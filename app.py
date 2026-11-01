@@ -24,7 +24,6 @@ def get_db():
 
 
 def ensure_pending_table():
-    """pending_otp table না থাকলে বানাও"""
     conn = get_db()
     cur  = conn.cursor()
     cur.execute("""
@@ -32,8 +31,14 @@ def ensure_pending_table():
             phone            TEXT PRIMARY KEY,
             api_id           TEXT NOT NULL,
             api_hash         TEXT NOT NULL,
-            phone_code_hash  TEXT NOT NULL
+            phone_code_hash  TEXT NOT NULL,
+            temp_session     TEXT
         )
+    """)
+    # পুরানো table এ column না থাকলে add করো
+    cur.execute("""
+        ALTER TABLE pending_otp
+        ADD COLUMN IF NOT EXISTS temp_session TEXT
     """)
     conn.commit()
     cur.close()
@@ -56,26 +61,28 @@ def send_otp():
         client = TelegramClient(StringSession(), api_id, api_hash)
         await client.connect()
         result = await client.send_code_request(phone)
+        phone_code_hash = result.phone_code_hash
+        temp_session    = client.session.save()   # ← same session save
         await client.disconnect()
-        return result.phone_code_hash
+        return phone_code_hash, temp_session
 
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        phone_code_hash = loop.run_until_complete(_send())
+        phone_code_hash, temp_session = loop.run_until_complete(_send())
         loop.close()
 
-        # phone_code_hash Supabase এ save করো
         conn = get_db()
         cur  = conn.cursor()
         cur.execute("""
-            INSERT INTO pending_otp (phone, api_id, api_hash, phone_code_hash)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO pending_otp (phone, api_id, api_hash, phone_code_hash, temp_session)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (phone) DO UPDATE SET
                 api_id          = EXCLUDED.api_id,
                 api_hash        = EXCLUDED.api_hash,
-                phone_code_hash = EXCLUDED.phone_code_hash
-        """, (phone, str(api_id), api_hash, phone_code_hash))
+                phone_code_hash = EXCLUDED.phone_code_hash,
+                temp_session    = EXCLUDED.temp_session
+        """, (phone, str(api_id), api_hash, phone_code_hash, temp_session))
         conn.commit()
         cur.close()
         conn.close()
@@ -96,11 +103,10 @@ def verify_otp():
     tg_user_id      = data["tg_user_id"]
     target_username = data["target_username"]
 
-    # Supabase থেকে pending_otp data লোড করো
     conn = get_db()
     cur  = conn.cursor()
     cur.execute(
-        "SELECT api_id, api_hash, phone_code_hash FROM pending_otp WHERE phone = %s",
+        "SELECT api_id, api_hash, phone_code_hash, temp_session FROM pending_otp WHERE phone = %s",
         (phone,)
     )
     row = cur.fetchone()
@@ -108,13 +114,13 @@ def verify_otp():
     conn.close()
 
     if not row:
-        return jsonify({"status": "error", "message": "No pending OTP for this phone. SEND OTP আগে দাও।"}), 400
+        return jsonify({"status": "error", "message": "No pending OTP. SEND OTP আগে দাও।"}), 400
 
-    api_id, api_hash, phone_code_hash = row
+    api_id, api_hash, phone_code_hash, temp_session = row
 
     async def _verify():
-        # নতুন client বানাও — phone_code_hash DB থেকে নাও
-        client = TelegramClient(StringSession(), int(api_id), api_hash)
+        # ← same temp_session দিয়ে client বানাও
+        client = TelegramClient(StringSession(temp_session), int(api_id), api_hash)
         await client.connect()
         await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
         session_string = client.session.save()
@@ -127,7 +133,6 @@ def verify_otp():
         session_string = loop.run_until_complete(_verify())
         loop.close()
 
-        # user_sessions এ save করো
         conn = get_db()
         cur  = conn.cursor()
         cur.execute("""
@@ -140,7 +145,6 @@ def verify_otp():
                 target_username = EXCLUDED.target_username
         """, (tg_user_id, session_string, str(api_id), api_hash, target_username))
 
-        # pending_otp মুছে দাও
         cur.execute("DELETE FROM pending_otp WHERE phone = %s", (phone,))
         conn.commit()
         cur.close()
@@ -229,5 +233,4 @@ def automate_sale():
 
 
 if __name__ == "__main__":
-    # Single worker — threading=False যাতে asyncio loop conflict না হয়
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=False)
