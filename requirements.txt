@@ -1,0 +1,4 @@
+flask
+telethon
+psycopg2-binary
+gunicorn
