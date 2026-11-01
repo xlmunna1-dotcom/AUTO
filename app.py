@@ -227,6 +227,18 @@ def automate_sale():
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_sell())
         loop.close()
+        # Sell count বাড়াও
+        conn2 = get_db()
+        cur2  = conn2.cursor()
+        cur2.execute("""
+            INSERT INTO sell_stats (user_id, sell_count)
+            VALUES (%s, 1)
+            ON CONFLICT (user_id) DO UPDATE SET
+                sell_count = sell_stats.sell_count + 1
+        """, (tg_user_id,))
+        conn2.commit()
+        cur2.close()
+        conn2.close()
         return jsonify({"status": "success", "message": "Sale process completed!"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -234,3 +246,57 @@ def automate_sale():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=False)
+
+
+# ──────────────────────────────────────────────
+# ENDPOINT 4: /check_session
+# ──────────────────────────────────────────────
+@app.route("/check_session", methods=["POST"])
+def check_session():
+    data       = request.json
+    tg_user_id = data.get("tg_user_id", "")
+
+    if not tg_user_id:
+        return jsonify({"status": "invalid"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute(
+        "SELECT session_string, api_id, api_hash FROM user_sessions WHERE user_id = %s",
+        (tg_user_id,)
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        return jsonify({"status": "invalid", "message": "Session নেই।"})
+
+    session_string, api_id, api_hash = row
+
+    async def _check():
+        client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
+        await client.connect()
+        authorized = await client.is_user_authorized()
+        await client.disconnect()
+        return authorized
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        authorized = loop.run_until_complete(_check())
+        loop.close()
+
+        if authorized:
+            return jsonify({"status": "valid"})
+        else:
+            # Expired session DB থেকে মুছে দাও
+            conn = get_db()
+            cur  = conn.cursor()
+            cur.execute("DELETE FROM user_sessions WHERE user_id = %s", (tg_user_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return jsonify({"status": "invalid", "message": "Session expire হয়েছে।"})
+    except Exception as e:
+        return jsonify({"status": "invalid", "message": str(e)})
