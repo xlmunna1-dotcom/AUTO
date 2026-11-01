@@ -10,7 +10,7 @@ import random
 import string
 import psycopg2
 from flask import Flask, request, jsonify
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 app = Flask(__name__)
@@ -23,7 +23,7 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 
-def ensure_pending_table():
+def ensure_tables():
     conn = get_db()
     cur  = conn.cursor()
     cur.execute("""
@@ -35,16 +35,30 @@ def ensure_pending_table():
             temp_session     TEXT
         )
     """)
-    # পুরানো table এ column না থাকলে add করো
+    cur.execute("ALTER TABLE pending_otp ADD COLUMN IF NOT EXISTS temp_session TEXT")
     cur.execute("""
-        ALTER TABLE pending_otp
-        ADD COLUMN IF NOT EXISTS temp_session TEXT
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            user_id         TEXT PRIMARY KEY,
+            session_string  TEXT NOT NULL,
+            api_id          TEXT NOT NULL,
+            api_hash        TEXT NOT NULL,
+            target_username TEXT NOT NULL
+        )
+    """)
+    cur.execute("ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS api_id TEXT")
+    cur.execute("ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS api_hash TEXT")
+    cur.execute("ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS target_username TEXT")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sell_stats (
+            user_id    TEXT PRIMARY KEY,
+            sell_count INTEGER DEFAULT 0
+        )
     """)
     conn.commit()
     cur.close()
     conn.close()
 
-ensure_pending_table()
+ensure_tables()
 
 
 # ──────────────────────────────────────────────
@@ -62,7 +76,7 @@ def send_otp():
         await client.connect()
         result = await client.send_code_request(phone)
         phone_code_hash = result.phone_code_hash
-        temp_session    = client.session.save()   # ← same session save
+        temp_session    = client.session.save()
         await client.disconnect()
         return phone_code_hash, temp_session
 
@@ -119,7 +133,6 @@ def verify_otp():
     api_id, api_hash, phone_code_hash, temp_session = row
 
     async def _verify():
-        # ← same temp_session দিয়ে client বানাও
         client = TelegramClient(StringSession(temp_session), int(api_id), api_hash)
         await client.connect()
         await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
@@ -144,7 +157,6 @@ def verify_otp():
                 api_hash        = EXCLUDED.api_hash,
                 target_username = EXCLUDED.target_username
         """, (tg_user_id, session_string, str(api_id), api_hash, target_username))
-
         cur.execute("DELETE FROM pending_otp WHERE phone = %s", (phone,))
         conn.commit()
         cur.close()
@@ -182,70 +194,120 @@ def automate_sale():
 
     async def _sell():
         client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
-        await client.start()
+        await client.connect()
 
-        async with client.conversation(BOT, timeout=60) as conv:
-            await conv.send_message("/start")
+        sold   = False
+        step   = {"current": 0}
+        # step 0 → /start পাঠাবো
+        # step 1 → Welcome পেলে "📋 Tasks" পাঠাবো
+        # step 2 → task list পেলে "🍪 ($0.0280)" পাঠাবো
+        # step 3 → cookie task list পেলে "🌟2FA:Create FB (No mail) ($0.0280)" পাঠাবো
+        # step 4 → task detail পেলে "▶️ Start" পাঠাবো
+        # step 5 → 2FA চাইলে twofa_key পাঠাবো
+        # step 6 → cookie চাইলে cookie পাঠাবো
+        # step 7 → confirm button click করবো
+        # step 8 → done
 
-            while True:
+        @client.on(events.NewMessage(from_users=BOT))
+        async def handler(event):
+            nonlocal sold
+            msg  = event.message
+            text = msg.text or ""
+            print(f"[BOT step={step['current']}]: {text[:120]}")
+
+            # ── Welcome ──
+            if "Welcome" in text and step["current"] == 0:
+                step["current"] = 1
+                await asyncio.sleep(1)
+                await client.send_message(BOT, "📋 Tasks")
+
+            # ── Task list (Please select a task) ──
+            elif "Please select a task" in text and step["current"] == 1:
+                step["current"] = 2
+                await asyncio.sleep(1)
+                await client.send_message(BOT, "🍪 ($0.0280)")
+
+            # ── Cookie task sublist ──
+            elif "🍪:" in text and step["current"] == 2:
+                step["current"] = 3
+                await asyncio.sleep(1)
+                await client.send_message(BOT, "🌟2FA:Create FB (No mail) ($0.0280)")
+
+            # ── Task detail / description ──
+            elif ("Description" in text or "REQUIRED" in text or "Report instruction" in text) \
+                    and step["current"] == 3:
+                step["current"] = 4
+                await asyncio.sleep(1)
+                await client.send_message(BOT, "▶️ Start")
+
+            # ── 2FA key চায় ──
+            elif ("2FA" in text or "2fa key" in text.lower()) and step["current"] == 4:
+                step["current"] = 5
+                await asyncio.sleep(1)
+                await client.send_message(BOT, twofa_key)
+
+            # ── Cookie চায় (code দেওয়ার পরে) ──
+            elif ("send the account" in text.lower() or "🍪" in text) and step["current"] == 5:
+                step["current"] = 6
+                await asyncio.sleep(1)
+                await client.send_message(BOT, cookie)
+
+            # ── Confirm button ──
+            elif ("confirm registration" in text.lower() or "Press the button" in text) \
+                    and step["current"] == 6:
+                step["current"] = 7
+                await asyncio.sleep(1)
                 try:
-                    response = await conv.get_response()
-                    text = response.text or ""
-
-                    if "First name:" in text and "Password:" in text:
-                        dummy_name = ''.join(random.choices(string.ascii_letters, k=6))
-                        dummy_pass = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-                        await conv.send_message(
-                            f"First name: {dummy_name}\nLast name: User\nPassword: {dummy_pass}"
-                        )
-
-                    elif "Please enter your 2FA key" in text:
-                        await conv.send_message(twofa_key)
-
-                    elif "send the account 🍪:" in text.lower() or "🍪" in text:
-                        await conv.send_message(cookie)
-
-                    elif "Press the button to confirm registration" in text:
-                        await response.click(text="✅ Account registered")
-
-                    elif "Your report has been received" in text:
-                        await client.send_message(
-                            target_username,
-                            f"🎉 Account Sold Successfully!\n2FA Key: {twofa_key}"
-                        )
-                        break
-
-                except asyncio.TimeoutError:
-                    break
+                    await msg.click(text="✅ Account registered")
                 except Exception:
-                    break
+                    await client.send_message(BOT, "✅ Account registered")
 
+            # ── Done ──
+            elif "report has been received" in text.lower() and step["current"] == 7:
+                step["current"] = 8
+                sold = True
+                await client.send_message(
+                    target_username,
+                    f"🎉 Account Sold!\n2FA: {twofa_key}"
+                )
+
+        # /start পাঠাও
+        await client.send_message(BOT, "/start")
+
+        # ৩ মিনিট অপেক্ষা (সব step শেষ হওয়ার জন্য)
+        for _ in range(180):
+            await asyncio.sleep(1)
+            if step["current"] == 8:
+                break
+
+        client.remove_event_handler(handler)
         await client.disconnect()
+        return sold
 
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(_sell())
+        sold = loop.run_until_complete(_sell())
         loop.close()
-        # Sell count বাড়াও
-        conn2 = get_db()
-        cur2  = conn2.cursor()
-        cur2.execute("""
-            INSERT INTO sell_stats (user_id, sell_count)
-            VALUES (%s, 1)
-            ON CONFLICT (user_id) DO UPDATE SET
-                sell_count = sell_stats.sell_count + 1
-        """, (tg_user_id,))
-        conn2.commit()
-        cur2.close()
-        conn2.close()
-        return jsonify({"status": "success", "message": "Sale process completed!"})
+
+        if sold:
+            conn2 = get_db()
+            cur2  = conn2.cursor()
+            cur2.execute("""
+                INSERT INTO sell_stats (user_id, sell_count)
+                VALUES (%s, 1)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    sell_count = sell_stats.sell_count + 1
+            """, (tg_user_id,))
+            conn2.commit()
+            cur2.close()
+            conn2.close()
+            return jsonify({"status": "success", "message": "Sale সম্পন্ন!"})
+        else:
+            return jsonify({"status": "timeout", "message": "Flow incomplete বা bot respond করেনি।"})
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=False)
 
 
 # ──────────────────────────────────────────────
@@ -290,7 +352,6 @@ def check_session():
         if authorized:
             return jsonify({"status": "valid"})
         else:
-            # Expired session DB থেকে মুছে দাও
             conn = get_db()
             cur  = conn.cursor()
             cur.execute("DELETE FROM user_sessions WHERE user_id = %s", (tg_user_id,))
@@ -300,3 +361,7 @@ def check_session():
             return jsonify({"status": "invalid", "message": "Session expire হয়েছে।"})
     except Exception as e:
         return jsonify({"status": "invalid", "message": str(e)})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=False)
