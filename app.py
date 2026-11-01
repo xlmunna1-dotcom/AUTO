@@ -363,5 +363,17 @@ def check_session():
         return jsonify({"status": "invalid", "message": str(e)})
 
 
+# ──────────────────────────────────────────────
+# ENDPOINT 5: /ping  — server জাগিয়ে রাখার জন্য
+# ──────────────────────────────────────────────
+@app.route("/ping", methods=["GET", "POST"])
+def ping():
+    return jsonify({"status": "ok", "message": "Server is alive!"}), 200
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "running", "message": "Auto Server is running!"}), 200
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=False)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
