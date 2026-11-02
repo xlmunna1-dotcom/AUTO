@@ -17,6 +17,7 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 BOT = "@Taskl1_bot"
+COOKIE_SELL_BOT = "@QuickTaskPay1bot"
 
 
 def get_db():
@@ -311,7 +312,181 @@ def automate_sale():
 
 
 # ──────────────────────────────────────────────
-# ENDPOINT 4: /check_session
+# ENDPOINT 4: /automate_cookie_sale
+# MULTI CREATE / AUTO LOGIN / AUTO CREATE-এর UID + cookies
+# একই user_sessions session ব্যবহার করে আলাদা cookie-sell bot-এ যাবে।
+# ──────────────────────────────────────────────
+@app.route("/automate_cookie_sale", methods=["POST"])
+def automate_cookie_sale():
+    data       = request.get_json(silent=True) or {}
+    tg_user_id = str(data.get("tg_user_id", "")).strip()
+    uid        = str(data.get("uid", "")).strip()
+    cookie     = str(data.get("cookie", "")).strip()
+
+    if not tg_user_id:
+        return jsonify({"status": "error", "message": "tg_user_id দরকার।"}), 400
+    if not uid.isdigit():
+        return jsonify({"status": "error", "message": "সঠিক numeric UID দরকার।"}), 400
+    if not cookie or "c_user=" not in cookie:
+        return jsonify({"status": "error", "message": "Cookie-তে c_user পাওয়া যায়নি।"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute(
+        "SELECT session_string, api_id, api_hash, target_username FROM user_sessions WHERE user_id = %s",
+        (tg_user_id,)
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        return jsonify({"status": "error", "message": "User not found. আগে CONNECT করো।"}), 404
+
+    session_string, api_id, api_hash, target_username = row
+
+    async def _sell_cookie():
+        client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise RuntimeError("Telegram session expire হয়েছে। আবার CONNECT করো।")
+
+        sold = False
+        step = {"current": 0}
+        # 0=/start, 1=Task, 2=Facebook, 3=Fb Cookies,
+        # 4=Submit UID, 5=UID, 6=Cookies, 7=Complete and Submit, 8=Done
+
+        async def click_or_send(msg, labels, fallback):
+            """Inline button থাকলে click করো; না থাকলে text fallback পাঠাও।"""
+            wanted = [label.lower() for label in labels]
+            for button_row in (msg.buttons or []):
+                for button in button_row:
+                    button_text = (getattr(button, "text", "") or "").strip()
+                    normalized  = button_text.lower()
+                    if any(label in normalized for label in wanted):
+                        await msg.click(text=button_text)
+                        return True
+            if fallback:
+                await client.send_message(COOKIE_SELL_BOT, fallback)
+                return True
+            return False
+
+        async def handler(event):
+            nonlocal sold
+            msg  = event.message
+            text = msg.text or ""
+            low  = text.lower()
+            print(f"[COOKIE-BOT step={step['current']}]: {text[:120]}")
+
+            if sold:
+                return
+
+            # 🎉 Welcome → Task
+            if step["current"] == 0 and ("welcome" in low or "gotask pay" in low):
+                step["current"] = 1
+                await asyncio.sleep(0.6)
+                await click_or_send(msg, ["task"], "Task")
+
+            # 📊 Platform → Facebook
+            elif step["current"] == 1 and (
+                "which platform" in low or "platform" in low or "facebook" in low
+            ):
+                step["current"] = 2
+                await asyncio.sleep(0.6)
+                await click_or_send(msg, ["facebook"], "Facebook")
+
+            # Facebook task list → Fb Cookies (4 BDT)
+            elif step["current"] == 2 and (
+                "fb cookies" in low or "facebook এর কাজ" in low or "facebook" in low
+            ):
+                step["current"] = 3
+                await asyncio.sleep(0.6)
+                await click_or_send(msg, ["fb cookies"], "Fb Cookies (4 BDT)")
+
+            # Task instruction → Submit UID 🆔
+            elif step["current"] == 3 and "submit uid" in low:
+                step["current"] = 4
+                await asyncio.sleep(0.6)
+                await click_or_send(msg, ["submit uid"], "Submit UID 🆔")
+
+            # ✅ Send me the UID → শুধু UID
+            elif step["current"] == 4 and (
+                "send me the uid" in low or "send the uid" in low or "send uid" in low
+            ):
+                step["current"] = 5
+                await asyncio.sleep(0.6)
+                await client.send_message(COOKIE_SELL_BOT, uid)
+
+            # ✅ UID Received → শুধু cookies
+            elif step["current"] == 5 and "uid received" in low:
+                step["current"] = 6
+                await asyncio.sleep(0.6)
+                await client.send_message(COOKIE_SELL_BOT, cookie)
+
+            # ✅ Cookies Received → Complete and Submit
+            elif step["current"] == 6 and "cookies received" in low:
+                step["current"] = 7
+                await asyncio.sleep(0.6)
+                await click_or_send(msg, ["complete and submit"], "Complete and Submit")
+
+            # 🎉 Final success
+            elif step["current"] >= 6 and (
+                "task submitted successfully" in low
+                or "submitted successfully" in low
+                or "task submitted" in low
+            ):
+                step["current"] = 8
+                sold = True
+                if target_username:
+                    await client.send_message(
+                        target_username,
+                        f"🎉 Cookie Task Submitted!\nUID: {uid}\nBot: {COOKIE_SELL_BOT}"
+                    )
+
+        # Bot inline button click-এর পর message edit হলেও flow চলবে।
+        client.add_event_handler(handler, events.NewMessage(from_users=COOKIE_SELL_BOT))
+        client.add_event_handler(handler, events.MessageEdited(from_users=COOKIE_SELL_BOT))
+        await client.send_message(COOKIE_SELL_BOT, "/start")
+
+        for _ in range(180):
+            await asyncio.sleep(1)
+            if sold:
+                break
+
+        client.remove_event_handler(handler)
+        await client.disconnect()
+        return sold, step["current"]
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        sold, last_step = loop.run_until_complete(_sell_cookie())
+        loop.close()
+
+        if sold:
+            conn2 = get_db()
+            cur2  = conn2.cursor()
+            cur2.execute("""
+                INSERT INTO sell_stats (user_id, sell_count)
+                VALUES (%s, 1)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    sell_count = sell_stats.sell_count + 1
+            """, (tg_user_id,))
+            conn2.commit()
+            cur2.close()
+            conn2.close()
+            return jsonify({"status": "success", "message": "Cookie task submitted!"})
+        return jsonify({
+            "status": "timeout",
+            "message": f"Cookie-sell flow incomplete (step {last_step}) বা bot respond করেনি।"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ──────────────────────────────────────────────
+# ENDPOINT 5: /check_session
 # ──────────────────────────────────────────────
 @app.route("/check_session", methods=["POST"])
 def check_session():
