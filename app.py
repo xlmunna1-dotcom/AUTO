@@ -1,7 +1,6 @@
 # ============================================================
-# FILE: app.py  — FINAL VERSION (Only Inline Colored Buttons + Timeout Fix)
-# Requirements: flask, telethon, psycopg2-binary, python-telegram-bot>=22.7
-# Run: python app.py
+# FILE: app.py  — FINAL VERSION (Emoji Captcha + Usage Bug Fixed)
+# Requirements: flask, gunicorn, telethon, psycopg2-binary, python-telegram-bot>=22.7
 # ============================================================
 
 import os
@@ -79,7 +78,6 @@ def progress_bar(current: int, total: int, length: int = 10) -> str:
 def esc(text) -> str:
     return html.escape(str(text) if text is not None else "")
 
-# ── Colored InlineKeyboardButton helper ──
 def btn(text: str, callback_data: str = None, url: str = None,
         style: str = None) -> InlineKeyboardButton:
     kwargs = {"text": text}
@@ -238,7 +236,8 @@ def mark_key_used(key: str, device_id: str):
     conn.commit(); cur.close(); conn.close()
 
 
-def check_and_increment_key_usage(user_id: int) -> tuple:
+# ✅ ব্যবহার চেক করার ফাংশন (কেবল চেক করবে, বাড়াবে না)
+def check_key_usage_limit(user_id: int) -> tuple:
     conn = get_db(); cur = conn.cursor()
     cur.execute(
         "SELECT key_count, last_reset FROM user_key_usage WHERE user_id = %s",
@@ -249,20 +248,12 @@ def check_and_increment_key_usage(user_id: int) -> tuple:
     limit = _admin_daily_key_limit["value"]
 
     if row is None:
-        cur.execute(
-            "INSERT INTO user_key_usage (user_id, key_count, last_reset) VALUES (%s, 1, %s)",
-            (str(user_id), now)
-        )
-        conn.commit(); cur.close(); conn.close()
+        cur.close(); conn.close()
         return True, "ok"
 
     key_count, last_reset = row
     if now - last_reset >= 86400:
-        cur.execute(
-            "UPDATE user_key_usage SET key_count=1, last_reset=%s WHERE user_id=%s",
-            (now, str(user_id))
-        )
-        conn.commit(); cur.close(); conn.close()
+        cur.close(); conn.close()
         return True, "ok"
 
     if limit > 0 and key_count >= limit:
@@ -277,12 +268,38 @@ def check_and_increment_key_usage(user_id: int) -> tuple:
             f"🔄 <b>{hours_r}h {mins_r}m</b> পরে Reset হবে"
         )
 
+    cur.close(); conn.close()
+    return True, "ok"
+
+
+# ✅ Key সফলভাবে তৈরি হওয়ার পর কাউন্ট বাড়াবে
+def increment_key_usage(user_id: int):
+    conn = get_db(); cur = conn.cursor()
     cur.execute(
-        "UPDATE user_key_usage SET key_count=key_count+1 WHERE user_id=%s",
+        "SELECT key_count, last_reset FROM user_key_usage WHERE user_id = %s",
         (str(user_id),)
     )
+    row = cur.fetchone()
+    now = int(time.time())
+
+    if row is None:
+        cur.execute(
+            "INSERT INTO user_key_usage (user_id, key_count, last_reset) VALUES (%s, 1, %s)",
+            (str(user_id), now)
+        )
+    else:
+        key_count, last_reset = row
+        if now - last_reset >= 86400:
+            cur.execute(
+                "UPDATE user_key_usage SET key_count=1, last_reset=%s WHERE user_id=%s",
+                (now, str(user_id))
+            )
+        else:
+            cur.execute(
+                "UPDATE user_key_usage SET key_count=key_count+1 WHERE user_id=%s",
+                (str(user_id),)
+            )
     conn.commit(); cur.close(); conn.close()
-    return True, "ok"
 
 
 def _fmt_duration(days: float) -> str:
@@ -367,7 +384,8 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user  = query.from_user
 
-    allowed, err_msg = check_and_increment_key_usage(user.id)
+    # ✅ শুধু চেক করবে, বাড়াবে না
+    allowed, err_msg = check_key_usage_limit(user.id)
     if not allowed:
         await query.edit_message_text(
             f"{header('LIMIT REACHED', '🚫')}{err_msg}\n{footer()}",
@@ -378,14 +396,22 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    a      = random.randint(10, 99)
-    b      = random.randint(10, 99)
-    _captcha_pending[user.id] = (a + b, time.time() + 120)
+    # ✅ ইমোজি ক্যাপচা জেনারেট
+    emojis = ["🍎", "🍌", "🚗", "🐶", "🐱", "🍕", "⚽", "🎈", "🌟", "🔥"]
+    e1, e2 = random.sample(emojis, 2)
+    a = random.randint(10, 99)
+    b = random.randint(10, 99)
+    
+    # প্রশ্ন তৈরি (উদাহরণ: 🍎 23 + 🍌 33 = ?)
+    question_text = f"{e1} {a}  +  {e2} {b}"
+    correct_ans = a + b
+    
+    _captcha_pending[user.id] = (correct_ans, time.time() + 120)
 
     await query.edit_message_text(
         f"{header('CAPTCHA চ্যালেঞ্জ', '🤖')}"
-        f"🧮  <b>{a}  +  {b}  =  ?</b>\n\n"
-        f"✏️ সঠিক উত্তর <b>টাইপ করে পাঠান</b>\n"
+        f"🧮  <b>{question_text}  =  ?</b>\n\n"
+        f"✏️ সঠিক উত্তর <b>শুধু সংখ্যায়</b> টাইপ করে পাঠান\n"
         f"⏱️ সময় বাকি: <b>২ মিনিট</b>\n"
         f"{divider()}"
         f"<i>/cancel দিয়ে বাতিল করুন</i>",
@@ -417,12 +443,16 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text.isdigit() or int(text) != correct_ans:
         await update.message.reply_text(
             f"❌ <b>ভুল উত্তর!</b>\n\nআবার চেষ্টা করুন 👇\n"
-            f"<i>সঠিক সংখ্যাটি টাইপ করুন</i>",
+            f"<i>শুধু সঠিক সংখ্যাটি টাইপ করুন</i>",
             parse_mode="HTML"
         )
         return CAPTCHA_STATE
 
+    # ✅ ক্যাপচা সঠিক হলে ডিলিট
     del _captcha_pending[uid]
+
+    # ✅ এখন কাউন্ট বাড়ান (ক্যাপচা সলভ হওয়ার পর)
+    increment_key_usage(uid)
 
     tg_username = user.username or ""
     tg_name     = (user.first_name or "") + (" " + (user.last_name or "") if user.last_name else "")
@@ -875,9 +905,8 @@ def run_license_bot():
 
     async def _run():
         bot_app = None
-        while True:  # infinite retry loop
+        while True:
             try:
-                # Timeout বাড়িয়ে বিল্ড করা হলো
                 bot_app = (
                     Application.builder()
                     .token(LICENSE_BOT_TOKEN)
@@ -918,7 +947,6 @@ def run_license_bot():
 
                 print("[LICENSE BOT] ✅ Bot starting...", flush=True)
 
-                # Initialize with 5x retry
                 for attempt in range(5):
                     try:
                         await bot_app.initialize()
@@ -937,14 +965,12 @@ def run_license_bot():
                 )
                 print("[LICENSE BOT] ✅ Polling active!", flush=True)
 
-                # Keep alive forever
                 while True:
                     await asyncio.sleep(3600)
 
             except Exception as e:
                 print(f"[LICENSE BOT] ❌ Error: {e}", flush=True)
                 import traceback; traceback.print_exc()
-                # Cleanup
                 if bot_app:
                     try:
                         if bot_app.updater and bot_app.updater.running:
