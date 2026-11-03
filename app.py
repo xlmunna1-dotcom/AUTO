@@ -1251,8 +1251,12 @@ def home():
     return jsonify({"status": "running", "message": "Auto Server is running!"}), 200
 
 
+# ══════════════════════════════════════════════════
+#  BOT THREAD — if এর বাইরে, Gunicorn এও চলবে ✅
+# ══════════════════════════════════════════════════
+bot_thread = threading.Thread(target=run_license_bot, daemon=True)
+bot_thread.start()
+
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_license_bot, daemon=True)
-    bot_thread.start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
