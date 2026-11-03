@@ -447,10 +447,7 @@ def run_license_bot():
         loop.close()
 
 
-# Start license bot in background thread
-_bot_thread = threading.Thread(target=run_license_bot, daemon=True, name="LicenseBot")
-_bot_thread.start()
-print("[MAIN] License bot thread started.", flush=True)
+# Bot is running separately via bot.py service
 
 
 # ──────────────────────────────────────────────
