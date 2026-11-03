@@ -43,10 +43,15 @@ CAPTCHA_STATE      = 1
 CUSTOM_KEY_DAYS    = 2
 USER_KEY_DURATION  = 3
 SET_LIMIT_STATE    = 4
+SET_ADMIN_STATE    = 5
 
 # Admin settings (in-memory)
 _admin_free_key_hours  = {"value": 24}
 _admin_daily_key_limit = {"value": 1}
+
+# Dynamic admin list (starts with env-based admins, supports runtime additions)
+_dynamic_admins          = set(ADMIN_IDS)
+_dynamic_admin_usernames = set()   # username-based (lowercase, no @)
 
 # Pending captcha answers
 _captcha_pending = {}
@@ -283,8 +288,13 @@ def _fmt_duration(days: float) -> str:
     return f"{int(total_secs // 3600)} ঘন্টা"
 
 
-def is_admin(uid: int) -> bool:
-    return uid in ADMIN_IDS
+def is_admin(uid: int, username: str = None) -> bool:
+    if uid in _dynamic_admins:
+        return True
+    if username and username.lower().lstrip("@") in _dynamic_admin_usernames:
+        _dynamic_admins.add(uid)   # promote to ID-based for speed
+        return True
+    return False
 
 
 # ══════════════════════════════════════════════════════════
@@ -326,7 +336,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name  = user.first_name or "বন্ধু"
     limit = _admin_daily_key_limit["value"]
     hours = _admin_free_key_hours["value"]
-    admin = is_admin(user.id)
+    admin = is_admin(user.id, user.username)
 
     # Reply keyboard (bottom bar)
     await update.message.reply_text(
@@ -335,16 +345,16 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_reply_keyboard(admin)
     )
 
-    # Inline keyboard (main card)
+    # Inline keyboard (main card) — color: 🟢 success  🔵 primary  🔴 danger
     inline_kb = [
-        [InlineKeyboardButton("🔑  GET NEW KEY", callback_data="get_new_key")],
+        [InlineKeyboardButton("🟢 🔑  GET NEW KEY", callback_data="get_new_key")],
         [
-            InlineKeyboardButton("ℹ️ Info",      callback_data="info"),
-            InlineKeyboardButton("📞 Support",   callback_data="support"),
+            InlineKeyboardButton("🔵 ℹ️ Info",      callback_data="info"),
+            InlineKeyboardButton("🔵 📞 Support",   callback_data="support"),
         ],
     ]
     if admin:
-        inline_kb.insert(1, [InlineKeyboardButton("⚙️  ADMIN PANEL", callback_data="admin_panel")])
+        inline_kb.insert(1, [InlineKeyboardButton("🔴 ⚙️  ADMIN PANEL", callback_data="admin_panel")])
 
     limit_line = f"∞ Unlimited" if limit == 0 else f"{limit}টি / দিন"
 
@@ -366,7 +376,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text  = update.message.text
     user  = update.effective_user
-    admin = is_admin(user.id)
+    admin = is_admin(user.id, user.username)
 
     if text == "🔑 GET NEW KEY":
         # limit check
@@ -544,7 +554,7 @@ async def cb_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔙 Back", callback_data="back_start")]]
+            [[InlineKeyboardButton("⬅️ Back", callback_data="back_start")]]
         )
     )
 
@@ -560,8 +570,8 @@ async def cb_support(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📩 Contact Dev", url=TG_BOT_LINK)],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_start")],
+            [InlineKeyboardButton("🟢 📩 Contact Dev", url=TG_BOT_LINK)],
+            [InlineKeyboardButton("⬅️ Back",           callback_data="back_start")],
         ])
     )
 
@@ -573,18 +583,18 @@ async def cb_back_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user  = query.from_user
     limit = _admin_daily_key_limit["value"]
     hours = _admin_free_key_hours["value"]
-    admin = is_admin(user.id)
+    admin = is_admin(user.id, user.username)
     limit_line = "∞ Unlimited" if limit == 0 else f"{limit}টি / দিন"
 
     inline_kb = [
-        [InlineKeyboardButton("🔑  GET NEW KEY", callback_data="get_new_key")],
+        [InlineKeyboardButton("🟢 🔑  GET NEW KEY", callback_data="get_new_key")],
         [
-            InlineKeyboardButton("ℹ️ Info",    callback_data="info"),
-            InlineKeyboardButton("📞 Support", callback_data="support"),
+            InlineKeyboardButton("🔵 ℹ️ Info",    callback_data="info"),
+            InlineKeyboardButton("🔵 📞 Support", callback_data="support"),
         ],
     ]
     if admin:
-        inline_kb.insert(1, [InlineKeyboardButton("⚙️  ADMIN PANEL", callback_data="admin_panel")])
+        inline_kb.insert(1, [InlineKeyboardButton("🔴 ⚙️  ADMIN PANEL", callback_data="admin_panel")])
 
     await query.edit_message_text(
         f"{header(APP_NAME + ' License', '🛡️')}"
@@ -615,14 +625,15 @@ async def _send_admin_panel_msg(msg_obj, edit=False):
 
     keyboard = [
         [
-            InlineKeyboardButton("🔐 Custom Key",     callback_data="admin_custom_key"),
-            InlineKeyboardButton("⏱️ Duration",        callback_data="admin_set_duration"),
+            InlineKeyboardButton("🟢 🔐 Custom Key",  callback_data="admin_custom_key"),
+            InlineKeyboardButton("🟢 ⏱️ Duration",     callback_data="admin_set_duration"),
         ],
         [
-            InlineKeyboardButton("🚦 Set Limit",      callback_data="admin_set_limit"),
-            InlineKeyboardButton("📋 Keys List",       callback_data="admin_list_keys"),
+            InlineKeyboardButton("🔵 🚦 Set Limit",   callback_data="admin_set_limit"),
+            InlineKeyboardButton("🔵 📋 Keys List",    callback_data="admin_list_keys"),
         ],
-        [InlineKeyboardButton("🔙 Back", callback_data="back_start")],
+        [InlineKeyboardButton("🔴 👑 SET ADMIN",      callback_data="admin_set_admin")],
+        [InlineKeyboardButton("⬅️ Back",               callback_data="back_start")],
     ]
     text = (
         f"{header('ADMIN PANEL', '⚙️')}"
@@ -689,7 +700,7 @@ async def handle_custom_key_days(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         f"{footer()}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_panel")]]
         )
     )
     return ConversationHandler.END
@@ -733,7 +744,7 @@ async def handle_set_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"User এখন থেকে *{hours} ঘন্টার* Key পাবে।",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_panel")]]
         )
     )
     return ConversationHandler.END
@@ -780,7 +791,7 @@ async def handle_set_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🔄 ২৪ ঘন্টা পর Automatic Reset।",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_panel")]]
         )
     )
     return ConversationHandler.END
@@ -820,9 +831,77 @@ async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "\n".join(lines) + footer(),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_panel")]]
         )
     )
+
+
+# ── SET ADMIN ──
+async def cb_admin_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.answer("❌ Access Denied!", show_alert=True); return
+    await query.edit_message_text(
+        f"{header('SET ADMIN', '👑')}"
+        f"নতুন Admin যোগ করতে তার:\n\n"
+        f"│ *Username* → `@username`\n"
+        f"│ *User ID*  → `123456789`\n\n"
+        f"{divider()}"
+        f"_Username বা Numeric ID টাইপ করুন 👇_\n"
+        f"_/cancel দিয়ে বাতিল করুন_",
+        parse_mode="Markdown"
+    )
+    return SET_ADMIN_STATE
+
+
+async def handle_set_admin_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return ConversationHandler.END
+
+    raw = update.message.text.strip()
+
+    # Try numeric ID first
+    if raw.lstrip("-").isdigit():
+        new_admin_id = int(raw)
+        _dynamic_admins.add(new_admin_id)
+        await update.message.reply_text(
+            f"{header('ADMIN ADDED ✅', '👑')}"
+            f"🆔 *User ID:* `{new_admin_id}`\n\n"
+            f"✅ এখন থেকে এই User Admin হিসেবে কাজ করবে!\n"
+            f"📌 Bot restart হলে শুধু ENV-এর Admin টিকবে।\n"
+            f"{footer()}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_panel")]]
+            )
+        )
+        return ConversationHandler.END
+
+    # Username handle করা
+    username = raw.lstrip("@").lower()
+    if not username:
+        await update.message.reply_text(
+            "❌ Valid username বা ID দিন।", parse_mode="Markdown"
+        )
+        return SET_ADMIN_STATE
+
+    # Username store করি global set-এ
+    _dynamic_admin_usernames.add(username)
+
+    await update.message.reply_text(
+        f"{header('ADMIN ADDED ✅', '👑')}"
+        f"👤 *Username:* @{username}\n\n"
+        f"✅ এই Username যখন bot use করবে তখন Admin হিসেবে দেখাবে!\n"
+        f"💡 নিশ্চিত করতে User ID দেওয়া সবচেয়ে ভালো।\n"
+        f"{footer()}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_panel")]]
+        )
+    )
+    return ConversationHandler.END
 
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -853,6 +932,7 @@ def run_license_bot():
                     CallbackQueryHandler(cb_admin_custom_key,   pattern="^admin_custom_key$"),
                     CallbackQueryHandler(cb_admin_set_duration, pattern="^admin_set_duration$"),
                     CallbackQueryHandler(cb_admin_set_limit,    pattern="^admin_set_limit$"),
+                    CallbackQueryHandler(cb_admin_set_admin,    pattern="^admin_set_admin$"),
                     MessageHandler(
                         filters.TEXT & ~filters.COMMAND & filters.Regex("^🔑 GET NEW KEY$"),
                         handle_reply_kb
@@ -863,17 +943,18 @@ def run_license_bot():
                     CUSTOM_KEY_DAYS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_key_days)],
                     USER_KEY_DURATION:[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_duration)],
                     SET_LIMIT_STATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_limit)],
+                    SET_ADMIN_STATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_admin_input)],
                 },
                 fallbacks=[CommandHandler("cancel", cmd_cancel)],
                 allow_reentry=True,
             )
 
             bot_app.add_handler(CommandHandler("start", cmd_start))
-            bot_app.add_handler(CallbackQueryHandler(cb_admin_panel,    pattern="^admin_panel$"))
-            bot_app.add_handler(CallbackQueryHandler(cb_admin_list_keys,pattern="^admin_list_keys$"))
-            bot_app.add_handler(CallbackQueryHandler(cb_back_start,     pattern="^back_start$"))
-            bot_app.add_handler(CallbackQueryHandler(cb_info,           pattern="^info$"))
-            bot_app.add_handler(CallbackQueryHandler(cb_support,        pattern="^support$"))
+            bot_app.add_handler(CallbackQueryHandler(cb_admin_panel,     pattern="^admin_panel$"))
+            bot_app.add_handler(CallbackQueryHandler(cb_admin_list_keys, pattern="^admin_list_keys$"))
+            bot_app.add_handler(CallbackQueryHandler(cb_back_start,      pattern="^back_start$"))
+            bot_app.add_handler(CallbackQueryHandler(cb_info,            pattern="^info$"))
+            bot_app.add_handler(CallbackQueryHandler(cb_support,         pattern="^support$"))
             bot_app.add_handler(conv)
 
             # Reply keyboard shortcuts (outside conversation)
