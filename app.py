@@ -1,5 +1,5 @@
 # ============================================================
-# FILE: app.py  — UPGRADED UI VERSION (Color Buttons + SET ADMIN)
+# FILE: app.py  — UPGRADED UI VERSION (HTML parse_mode + Colors)
 # Requirements: flask, telethon, psycopg2-binary, python-telegram-bot>=22.7
 # Run: python app.py
 # ============================================================
@@ -11,6 +11,7 @@ import string
 import time
 import datetime
 import threading
+import html
 import psycopg2
 from flask import Flask, request, jsonify
 from telethon import TelegramClient, events
@@ -32,7 +33,7 @@ BOT             = "@Taskl1_bot"
 COOKIE_SELL_BOT = "@QuickTaskPay1bot"
 
 # ── LICENSE BOT CONFIG ──
-LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN", "9285384211:AAFmdMQcxF5kU0EUIXyRue8nBkrlD_4r6ak")
+LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN", "9285384211:AAF2tNUo5IpfTg9sEt2EJ8P9gTraXxcMOtI")
 ADMIN_IDS          = list(map(int, os.environ.get("ADMIN_IDS", "8301781046").split(",")))
 DEVELOPER_USERNAME = os.environ.get("DEVELOPER_USERNAME", "@NEXEX_99")
 APP_NAME           = os.environ.get("APP_NAME", "SuperToolsX")
@@ -60,7 +61,7 @@ def header(title: str, emoji: str = "🛡️") -> str:
     line = "▰" * 11
     return (
         f"{line}\n"
-        f"  {emoji}  *{title}*  {emoji}\n"
+        f"  {emoji}  <b>{title}</b>  {emoji}\n"
         f"{line}\n"
     )
 
@@ -71,10 +72,14 @@ def footer() -> str:
     return f"\n╰─ 👨‍💻 Dev: {DEVELOPER_USERNAME}"
 
 def progress_bar(current: int, total: int, length: int = 10) -> str:
-    filled = int(length * current / total)
+    filled = int(length * current / total) if total else 0
     bar = "█" * filled + "░" * (length - filled)
-    pct = int(100 * current / total)
+    pct = int(100 * current / total) if total else 0
     return f"[{bar}] {pct}%"
+
+def esc(text) -> str:
+    """HTML escape for dynamic user content"""
+    return html.escape(str(text) if text is not None else "")
 
 def main_reply_keyboard(is_admin_user: bool = False) -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton("🔑 GET NEW KEY")]]
@@ -94,8 +99,9 @@ def btn(text: str, callback_data: str = None, url: str = None,
     else:
         kwargs["callback_data"] = callback_data or "noop"
     if style:
-        kwargs["style"] = style   # এটাই মূল ফিক্স
+        kwargs["style"] = style
     return InlineKeyboardButton(**kwargs)
+
 
 # ══════════════════════════════════════════════════════════
 #  DB SETUP
@@ -243,7 +249,7 @@ def mark_key_used(key: str, device_id: str):
     conn.commit(); cur.close(); conn.close()
 
 
-def check_and_increment_key_usage(user_id: int) -> tuple[bool, str]:
+def check_and_increment_key_usage(user_id: int) -> tuple:
     conn = get_db(); cur = conn.cursor()
     cur.execute(
         "SELECT key_count, last_reset FROM user_key_usage WHERE user_id = %s",
@@ -278,8 +284,8 @@ def check_and_increment_key_usage(user_id: int) -> tuple[bool, str]:
         cur.close(); conn.close()
         return False, (
             f"📊 আজকের ব্যবহার: {bar}\n\n"
-            f"⛔ *{key_count}/{limit}* টি Key নেওয়া হয়েছে\n"
-            f"🔄 *{hours_r}h {mins_r}m* পরে Reset হবে"
+            f"⛔ <b>{key_count}/{limit}</b> টি Key নেওয়া হয়েছে\n"
+            f"🔄 <b>{hours_r}h {mins_r}m</b> পরে Reset হবে"
         )
 
     cur.execute(
@@ -337,19 +343,17 @@ def api_validate_key():
 # ── /start ──
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user  = update.effective_user
-    name  = user.first_name or "বন্ধু"
+    name  = esc(user.first_name or "বন্ধু")
     limit = _admin_daily_key_limit["value"]
     hours = _admin_free_key_hours["value"]
     admin = is_admin(user.id)
 
-    # Reply keyboard (bottom bar)
     await update.message.reply_text(
-        "🔽 *নিচের মেনু থেকে অপশন বেছে নিন:*",
-        parse_mode="Markdown",
+        "🔽 <b>নিচের মেনু থেকে অপশন বেছে নিন:</b>",
+        parse_mode="HTML",
         reply_markup=main_reply_keyboard(admin)
     )
 
-    # Inline keyboard — colored buttons (Bot API 9.4 / PTB v22.7+)
     inline_kb = [
         [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
         [
@@ -360,18 +364,18 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if admin:
         inline_kb.insert(1, [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")])
 
-    limit_line = f"∞ Unlimited" if limit == 0 else f"{limit}টি / দিন"
+    limit_line = "∞ Unlimited" if limit == 0 else f"{limit}টি / দিন"
 
     await update.message.reply_text(
         f"{header(APP_NAME + ' License', '🛡️')}"
-        f"👋 স্বাগতম, *{name}!*\n\n"
+        f"👋 স্বাগতম, <b>{name}!</b>\n\n"
         f"┌─────────────────────\n"
-        f"│ 🔑  Key / দিন :  *{limit_line}*\n"
-        f"│ ⏱️  মেয়াদ     :  *{hours} ঘন্টা*\n"
+        f"│ 🔑  Key / দিন :  <b>{limit_line}</b>\n"
+        f"│ ⏱️  মেয়াদ     :  <b>{hours} ঘন্টা</b>\n"
         f"│ 🔒  Device    :  একটি ফোন\n"
         f"└─────────────────────\n"
         f"{footer()}",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_kb)
     )
 
@@ -383,11 +387,11 @@ async def handle_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     admin = is_admin(user.id)
 
     if text == "🔑 GET NEW KEY":
-        allowed, msg = check_and_increment_key_usage(user.id)
+        allowed, err_msg = check_and_increment_key_usage(user.id)
         if not allowed:
             await update.message.reply_text(
-                f"{header('LIMIT REACHED', '🚫')}{msg}{footer()}",
-                parse_mode="Markdown"
+                f"{header('LIMIT REACHED', '🚫')}{err_msg}\n{footer()}",
+                parse_mode="HTML"
             )
             return ConversationHandler.END
 
@@ -396,12 +400,12 @@ async def handle_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _captcha_pending[user.id] = (a + b, time.time() + 120)
         await update.message.reply_text(
             f"{header('CAPTCHA চ্যালেঞ্জ', '🤖')}"
-            f"🧮  *{a}  +  {b}  =  ?*\n\n"
+            f"🧮  <b>{a}  +  {b}  =  ?</b>\n\n"
             f"✏️ সঠিক উত্তর পাঠান\n"
-            f"⏱️ সময় বাকি: *২ মিনিট*\n"
+            f"⏱️ সময় বাকি: <b>২ মিনিট</b>\n"
             f"{divider()}"
-            f"_/cancel টাইপ করে বাতিল করুন_",
-            parse_mode="Markdown",
+            f"<i>/cancel টাইপ করে বাতিল করুন</i>",
+            parse_mode="HTML",
             reply_markup=ReplyKeyboardRemove()
         )
         return CAPTCHA_STATE
@@ -412,24 +416,24 @@ async def handle_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif text == "ℹ️ INFO":
         await update.message.reply_text(
             f"{header('APP INFO', 'ℹ️')}"
-            f"📱 *App:* {APP_NAME}\n"
-            f"🤖 *Bot:* {DEVELOPER_USERNAME}\n"
-            f"🔗 *Link:* {TG_BOT_LINK}\n"
+            f"📱 <b>App:</b> {esc(APP_NAME)}\n"
+            f"🤖 <b>Bot:</b> {esc(DEVELOPER_USERNAME)}\n"
+            f"🔗 <b>Link:</b> {esc(TG_BOT_LINK)}\n"
             f"{divider()}"
             f"🔒 প্রতিটি Key একটি Device-এ লক হয়\n"
             f"⏳ মেয়াদ শেষে Key কাজ করবে না\n"
             f"{footer()}",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
     elif text == "📞 SUPPORT":
         await update.message.reply_text(
             f"{header('SUPPORT', '📞')}"
             f"সমস্যায় পড়লে Developer-কে নক করুন:\n\n"
-            f"👤 {DEVELOPER_USERNAME}\n"
-            f"🔗 {TG_BOT_LINK}\n"
+            f"👤 {esc(DEVELOPER_USERNAME)}\n"
+            f"🔗 {esc(TG_BOT_LINK)}\n"
             f"{footer()}",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 btn("📩 Contact Dev", url=TG_BOT_LINK, style="primary")
             ]])
@@ -442,11 +446,11 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user  = query.from_user
 
-    allowed, msg = check_and_increment_key_usage(user.id)
+    allowed, err_msg = check_and_increment_key_usage(user.id)
     if not allowed:
         await query.edit_message_text(
-            f"{header('LIMIT REACHED', '🚫')}{msg}{footer()}",
-            parse_mode="Markdown",
+            f"{header('LIMIT REACHED', '🚫')}{err_msg}\n{footer()}",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
                 [[btn("🔙 Back", callback_data="back_start", style="primary")]]
             )
@@ -459,12 +463,12 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         f"{header('CAPTCHA চ্যালেঞ্জ', '🤖')}"
-        f"🧮  *{a}  +  {b}  =  ?*\n\n"
-        f"✏️ সঠিক উত্তর *টাইপ করে পাঠান*\n"
-        f"⏱️ সময় বাকি: *২ মিনিট*\n"
+        f"🧮  <b>{a}  +  {b}  =  ?</b>\n\n"
+        f"✏️ সঠিক উত্তর <b>টাইপ করে পাঠান</b>\n"
+        f"⏱️ সময় বাকি: <b>২ মিনিট</b>\n"
         f"{divider()}"
-        f"_/cancel দিয়ে বাতিল করুন_",
-        parse_mode="Markdown"
+        f"<i>/cancel দিয়ে বাতিল করুন</i>",
+        parse_mode="HTML"
     )
     return CAPTCHA_STATE
 
@@ -488,16 +492,16 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"{header('TIME OUT!', '⏰')}"
             f"CAPTCHA-র সময় শেষ।\n/start দিয়ে আবার চেষ্টা করুন।",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=main_reply_keyboard(is_admin(uid))
         )
         return ConversationHandler.END
 
     if not text.isdigit() or int(text) != correct_ans:
         await update.message.reply_text(
-            f"❌ *ভুল উত্তর!*\n\nআবার চেষ্টা করুন 👇\n"
-            f"_সঠিক সংখ্যাটি টাইপ করুন_",
-            parse_mode="Markdown"
+            f"❌ <b>ভুল উত্তর!</b>\n\nআবার চেষ্টা করুন 👇\n"
+            f"<i>সঠিক সংখ্যাটি টাইপ করুন</i>",
+            parse_mode="HTML"
         )
         return CAPTCHA_STATE
 
@@ -517,23 +521,23 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     exp_str = exp.strftime("%d/%m/%Y %H:%M")
 
     if tg_username:
-        user_line = f"│ 👤  @{tg_username}\n"
+        user_line = f"│ 👤  @{esc(tg_username)}\n"
     else:
-        user_line = f"│ 👤  {tg_name.strip() or tg_id}\n"
+        user_line = f"│ 👤  {esc(tg_name.strip() or tg_id)}\n"
 
     await update.message.reply_text(
         f"{header('KEY GENERATED ✅', '🎉')}"
         f"┌─────────────────────\n"
         f"{user_line}"
-        f"│ ⏱️  মেয়াদ  :  *{_fmt_duration(days)}*\n"
-        f"│ 📅  Expire :  *{exp_str}*\n"
+        f"│ ⏱️  মেয়াদ  :  <b>{_fmt_duration(days)}</b>\n"
+        f"│ 📅  Expire :  <b>{exp_str}</b>\n"
         f"│ 🔒  Lock   :  একটি Device\n"
         f"└─────────────────────\n\n"
-        f"🔑 *Your License Key:*\n"
-        f"`{key}`\n\n"
-        f"📋 _Key copy করে App-এ দিন_\n"
+        f"🔑 <b>Your License Key:</b>\n"
+        f"<code>{key}</code>\n\n"
+        f"📋 <i>Key copy করে App-এ দিন</i>\n"
         f"{footer()}",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=main_reply_keyboard(is_admin(uid))
     )
     return ConversationHandler.END
@@ -549,13 +553,13 @@ async def cb_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"{header('APP INFO', 'ℹ️')}"
         f"┌─────────────────────\n"
-        f"│ 📱  App    :  *{APP_NAME}*\n"
-        f"│ 🔑  Limit  :  *{limit_line}*\n"
-        f"│ ⏱️  মেয়াদ  :  *{hours} ঘন্টা*\n"
+        f"│ 📱  App    :  <b>{esc(APP_NAME)}</b>\n"
+        f"│ 🔑  Limit  :  <b>{limit_line}</b>\n"
+        f"│ ⏱️  মেয়াদ  :  <b>{hours} ঘন্টা</b>\n"
         f"│ 🔒  Device :  একটি ফোন\n"
         f"└─────────────────────\n"
         f"{footer()}",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [[btn("🔙 Back", callback_data="back_start", style="primary")]]
         )
@@ -568,10 +572,10 @@ async def cb_support(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"{header('SUPPORT', '📞')}"
         f"সমস্যায় পড়লে নিচে যোগাযোগ করুন:\n\n"
-        f"👤 *Developer:* {DEVELOPER_USERNAME}\n"
-        f"🔗 {TG_BOT_LINK}\n"
+        f"👤 <b>Developer:</b> {esc(DEVELOPER_USERNAME)}\n"
+        f"🔗 {esc(TG_BOT_LINK)}\n"
         f"{footer()}",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [btn("📩 Contact Dev", url=TG_BOT_LINK, style="primary")],
             [btn("🔙 Back", callback_data="back_start", style="primary")],
@@ -602,12 +606,12 @@ async def cb_back_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"{header(APP_NAME + ' License', '🛡️')}"
         f"┌─────────────────────\n"
-        f"│ 🔑  Key / দিন :  *{limit_line}*\n"
-        f"│ ⏱️  মেয়াদ     :  *{hours} ঘন্টা*\n"
+        f"│ 🔑  Key / দিন :  <b>{limit_line}</b>\n"
+        f"│ ⏱️  মেয়াদ     :  <b>{hours} ঘন্টা</b>\n"
         f"│ 🔒  Device    :  একটি ফোন\n"
         f"└─────────────────────\n"
         f"{footer()}",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_kb)
     )
 
@@ -626,13 +630,6 @@ async def _send_admin_panel_msg(msg_obj, edit=False):
     active_keys = cur.fetchone()[0]
     cur.close(); conn.close()
 
-    # Admin Panel buttons — color coded:
-    # 🔐 Custom Key   → success (green)
-    # ⏱️ Duration     → primary (blue)
-    # 🚦 Set Limit    → primary (blue)
-    # 📋 Keys List    → primary (blue)
-    # 👑 Set Admin    → danger  (red) — powerful action
-    # 🔙 Back         → primary (blue)
     keyboard = [
         [
             btn("🔐 Custom Key", callback_data="admin_custom_key",   style="success"),
@@ -650,18 +647,18 @@ async def _send_admin_panel_msg(msg_obj, edit=False):
     text = (
         f"{header('ADMIN PANEL', '⚙️')}"
         f"┌─────────────────────\n"
-        f"│ ⏱️  Free duration :  *{hours}h*\n"
-        f"│ 🚦  Daily limit   :  *{limit if limit > 0 else '∞'}*\n"
-        f"│ 🔑  Total keys    :  *{total_keys}*\n"
-        f"│ ✅  Active keys   :  *{active_keys}*\n"
-        f"│ 👑  Total admins  :  *{len(ADMIN_IDS)}*\n"
+        f"│ ⏱️  Free duration :  <b>{hours}h</b>\n"
+        f"│ 🚦  Daily limit   :  <b>{limit if limit > 0 else '∞'}</b>\n"
+        f"│ 🔑  Total keys    :  <b>{total_keys}</b>\n"
+        f"│ ✅  Active keys   :  <b>{active_keys}</b>\n"
+        f"│ 👑  Total admins  :  <b>{len(ADMIN_IDS)}</b>\n"
         f"└─────────────────────\n"
         f"{footer()}"
     )
     if edit:
-        await msg_obj.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        await msg_obj.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await msg_obj.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        await msg_obj.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def cb_admin_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -679,14 +676,14 @@ async def cb_admin_custom_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(query.from_user.id): return
     await query.edit_message_text(
         f"{header('CUSTOM KEY', '🔐')}"
-        f"কত *দিনের* Key বানাবেন?\n\n"
-        f"│ `10`   → ১০ দিন\n"
-        f"│ `1`    → ১ দিন\n"
-        f"│ `0.5`  → ১২ ঘন্টা\n"
-        f"│ `30`   → ১ মাস\n"
+        f"কত <b>দিনের</b> Key বানাবেন?\n\n"
+        f"│ <code>10</code>   → ১০ দিন\n"
+        f"│ <code>1</code>    → ১ দিন\n"
+        f"│ <code>0.5</code>  → ১২ ঘন্টা\n"
+        f"│ <code>30</code>   → ১ মাস\n"
         f"{divider()}"
-        f"_সংখ্যাটি টাইপ করুন 👇_",
-        parse_mode="Markdown"
+        f"<i>সংখ্যাটি টাইপ করুন 👇</i>",
+        parse_mode="HTML"
     )
     return CUSTOM_KEY_DAYS
 
@@ -700,18 +697,21 @@ async def handle_custom_key_days(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         days = float(txt)
         assert days > 0
     except:
-        await update.message.reply_text("❌ সংখ্যা দিন (যেমন: `10` বা `0.5`)", parse_mode="Markdown")
+        await update.message.reply_text(
+            "❌ সংখ্যা দিন (যেমন: <code>10</code> বা <code>0.5</code>)",
+            parse_mode="HTML"
+        )
         return CUSTOM_KEY_DAYS
     key     = create_license_key(days)
     exp     = datetime.datetime.now() + datetime.timedelta(days=days)
     exp_str = exp.strftime("%d/%m/%Y %H:%M")
     await update.message.reply_text(
         f"{header('CUSTOM KEY CREATED ✅', '🔐')}"
-        f"🔑 *Key:*\n`{key}`\n\n"
-        f"│ ⏱️  মেয়াদ  :  *{_fmt_duration(days)}*\n"
-        f"│ 📅  Expire :  *{exp_str}*\n"
+        f"🔑 <b>Key:</b>\n<code>{key}</code>\n\n"
+        f"│ ⏱️  মেয়াদ  :  <b>{_fmt_duration(days)}</b>\n"
+        f"│ 📅  Expire :  <b>{exp_str}</b>\n"
         f"{footer()}",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
         )
@@ -727,15 +727,15 @@ async def cb_admin_set_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cur_h = _admin_free_key_hours["value"]
     await query.edit_message_text(
         f"{header('KEY DURATION SET', '⏱️')}"
-        f"বর্তমান মেয়াদ: *{cur_h} ঘন্টা*\n\n"
-        f"User 'GET NEW KEY' চাপলে কত *ঘন্টার* Key পাবে?\n\n"
-        f"│ `1`   → ১ ঘন্টা\n"
-        f"│ `24`  → ১ দিন\n"
-        f"│ `72`  → ৩ দিন\n"
-        f"│ `168` → ৭ দিন\n"
+        f"বর্তমান মেয়াদ: <b>{cur_h} ঘন্টা</b>\n\n"
+        f"User 'GET NEW KEY' চাপলে কত <b>ঘন্টার</b> Key পাবে?\n\n"
+        f"│ <code>1</code>   → ১ ঘন্টা\n"
+        f"│ <code>24</code>  → ১ দিন\n"
+        f"│ <code>72</code>  → ৩ দিন\n"
+        f"│ <code>168</code> → ৭ দিন\n"
         f"{divider()}"
-        f"_সংখ্যাটি টাইপ করুন 👇_",
-        parse_mode="Markdown"
+        f"<i>সংখ্যাটি টাইপ করুন 👇</i>",
+        parse_mode="HTML"
     )
     return USER_KEY_DURATION
 
@@ -749,13 +749,16 @@ async def handle_set_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         hours = int(txt)
         assert hours > 0
     except:
-        await update.message.reply_text("❌ পূর্ণসংখ্যা দিন (যেমন: `24`)", parse_mode="Markdown")
+        await update.message.reply_text(
+            "❌ পূর্ণসংখ্যা দিন (যেমন: <code>24</code>)",
+            parse_mode="HTML"
+        )
         return USER_KEY_DURATION
     _admin_free_key_hours["value"] = hours
     await update.message.reply_text(
-        f"✅ *Duration Updated!*\n\n"
-        f"User এখন থেকে *{hours} ঘন্টার* Key পাবে।",
-        parse_mode="Markdown",
+        f"✅ <b>Duration Updated!</b>\n\n"
+        f"User এখন থেকে <b>{hours} ঘন্টার</b> Key পাবে।",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
         )
@@ -772,15 +775,15 @@ async def cb_admin_set_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cur_label = "Unlimited ∞" if current == 0 else f"{current}টি"
     await query.edit_message_text(
         f"{header('SET DAILY LIMIT', '🚦')}"
-        f"বর্তমান Limit: *{cur_label}*\n\n"
+        f"বর্তমান Limit: <b>{cur_label}</b>\n\n"
         f"প্রতি User ২৪ ঘন্টায় কয়টি Key নিতে পারবে?\n\n"
-        f"│ `0` → Unlimited ∞\n"
-        f"│ `1` → দিনে ১টি\n"
-        f"│ `3` → দিনে ৩টি\n"
-        f"│ `5` → দিনে ৫টি\n"
+        f"│ <code>0</code> → Unlimited ∞\n"
+        f"│ <code>1</code> → দিনে ১টি\n"
+        f"│ <code>3</code> → দিনে ৩টি\n"
+        f"│ <code>5</code> → দিনে ৫টি\n"
         f"{divider()}"
-        f"_সংখ্যাটি টাইপ করুন 👇_",
-        parse_mode="Markdown"
+        f"<i>সংখ্যাটি টাইপ করুন 👇</i>",
+        parse_mode="HTML"
     )
     return SET_LIMIT_STATE
 
@@ -794,15 +797,18 @@ async def handle_set_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         limit = int(txt)
         assert limit >= 0
     except:
-        await update.message.reply_text("❌ সংখ্যা দিন (`0` = unlimited)", parse_mode="Markdown")
+        await update.message.reply_text(
+            "❌ সংখ্যা দিন (<code>0</code> = unlimited)",
+            parse_mode="HTML"
+        )
         return SET_LIMIT_STATE
     _admin_daily_key_limit["value"] = limit
-    label = "∞ Unlimited" if limit == 0 else f"*{limit}টি*"
+    label = "∞ Unlimited" if limit == 0 else f"<b>{limit}টি</b>"
     await update.message.reply_text(
-        f"✅ *Limit Updated!*\n\n"
+        f"✅ <b>Limit Updated!</b>\n\n"
         f"প্রতি User প্রতিদিন {label} Key নিতে পারবে।\n"
         f"🔄 ২৪ ঘন্টা পর Automatic Reset।",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
         )
@@ -811,7 +817,7 @@ async def handle_set_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════════
-#  SET ADMIN — নতুন feature
+#  SET ADMIN
 # ══════════════════════════════════════════════════
 
 async def cb_admin_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -821,19 +827,18 @@ async def cb_admin_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ Access Denied!", show_alert=True)
         return ConversationHandler.END
 
-    # বর্তমান admin list দেখানো
-    admin_list_str = "\n".join([f"│ 👑  `{aid}`" for aid in ADMIN_IDS])
+    admin_list_str = "\n".join([f"│ 👑  <code>{aid}</code>" for aid in ADMIN_IDS])
 
     await query.edit_message_text(
         f"{header('SET ADMIN', '👑')}"
         f"বর্তমান Admin তালিকা:\n"
         f"{admin_list_str}\n\n"
         f"{divider()}"
-        f"নতুন Admin যোগ করতে তার *User ID* বা *@username* পাঠান:\n\n"
-        f"│ উদাহরণ: `123456789`\n"
-        f"│ অথবা: `@username`\n\n"
-        f"_/cancel দিয়ে বাতিল করুন_",
-        parse_mode="Markdown"
+        f"নতুন Admin যোগ করতে তার <b>User ID</b> বা <b>@username</b> পাঠান:\n\n"
+        f"│ উদাহরণ: <code>123456789</code>\n"
+        f"│ অথবা: <code>@username</code>\n\n"
+        f"<i>/cancel দিয়ে বাতিল করুন</i>",
+        parse_mode="HTML"
     )
     return SET_ADMIN_STATE
 
@@ -845,7 +850,6 @@ async def handle_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
-    # Username দিলে — bot দিয়ে ID খোঁজার চেষ্টা
     if text.startswith("@"):
         username = text.lstrip("@")
         try:
@@ -854,27 +858,28 @@ async def handle_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             new_admin_name = f"@{username}"
         except Exception as e:
             await update.message.reply_text(
-                f"❌ *Username পাওয়া যায়নি!*\n\n"
-                f"Error: `{str(e)[:100]}`\n\n"
-                f"সরাসরি Numeric *User ID* দিন।",
-                parse_mode="Markdown"
+                f"❌ <b>Username পাওয়া যায়নি!</b>\n\n"
+                f"Error: <code>{esc(str(e)[:100])}</code>\n\n"
+                f"সরাসরি Numeric <b>User ID</b> দিন।",
+                parse_mode="HTML"
             )
             return SET_ADMIN_STATE
     elif text.isdigit():
         new_admin_id   = int(text)
-        new_admin_name = f"`{new_admin_id}`"
+        new_admin_name = str(new_admin_id)
     else:
         await update.message.reply_text(
-            "❌ *সঠিক ID বা @username দিন!*\n\n"
-            "উদাহরণ: `123456789` বা `@username`",
-            parse_mode="Markdown"
+            "❌ <b>সঠিক ID বা @username দিন!</b>\n\n"
+            "উদাহরণ: <code>123456789</code> বা <code>@username</code>",
+            parse_mode="HTML"
         )
         return SET_ADMIN_STATE
 
     if new_admin_id in ADMIN_IDS:
+        safe_name = esc(new_admin_name)
         await update.message.reply_text(
-            f"⚠️ *{new_admin_name}* ইতিমধ্যে Admin আছে!",
-            parse_mode="Markdown",
+            f"⚠️ <b>{safe_name}</b> ইতিমধ্যে Admin আছে!",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
                 [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
             )
@@ -886,13 +891,13 @@ async def handle_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"{header('ADMIN ADDED ✅', '👑')}"
         f"🎉 নতুন Admin যোগ হয়েছে!\n\n"
-        f"│ 👑  ID     :  `{new_admin_id}`\n"
-        f"│ 📊  মোট   :  *{len(ADMIN_IDS)}* জন Admin\n"
+        f"│ 👑  ID     :  <code>{new_admin_id}</code>\n"
+        f"│ 📊  মোট   :  <b>{len(ADMIN_IDS)}</b> জন Admin\n"
         f"{divider()}"
-        f"⚠️ _Note: Server restart হলে এই change হারিয়ে যাবে।_\n"
-        f"_Permanent করতে ADMIN\\_IDS env variable আপডেট করুন।_"
+        f"⚠️ <i>Note: Server restart হলে এই change হারিয়ে যাবে।</i>\n"
+        f"<i>Permanent করতে ADMIN_IDS env variable আপডেট করুন।</i>\n"
         f"{footer()}",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
         )
@@ -913,7 +918,7 @@ async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await query.edit_message_text(
             f"{header('KEYS LIST', '📋')}কোনো Key নেই।",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
     now   = int(time.time())
@@ -925,14 +930,14 @@ async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rem     = max(0, exp - now)
         d, h    = rem // 86400, (rem % 86400) // 3600
         dev_str = "🔒 Locked" if dev else "🔓 Free"
-        user_str = f"@{tg_user}" if tg_user else "—"
+        user_str = f"@{esc(tg_user)}" if tg_user else "—"
         lines.append(
-            f"{status} *#{i}* `{k[-12:]}`\n"
+            f"{status} <b>#{i}</b> <code>{k[-12:]}</code>\n"
             f"   👤 {user_str}  |  ⏱ {d}d {h}h  |  {dev_str}"
         )
     await query.edit_message_text(
         "\n".join(lines) + footer(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
         )
@@ -943,8 +948,8 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     _captcha_pending.pop(uid, None)
     await update.message.reply_text(
-        "❌ *বাতিল করা হয়েছে।*",
-        parse_mode="Markdown",
+        "❌ <b>বাতিল করা হয়েছে।</b>",
+        parse_mode="HTML",
         reply_markup=main_reply_keyboard(is_admin(uid))
     )
     return ConversationHandler.END
@@ -992,7 +997,6 @@ def run_license_bot():
             bot_app.add_handler(CallbackQueryHandler(cb_support,        pattern="^support$"))
             bot_app.add_handler(conv)
 
-            # Reply keyboard shortcuts (outside conversation)
             bot_app.add_handler(MessageHandler(
                 filters.TEXT & ~filters.COMMAND & filters.Regex("^(⚙️ ADMIN PANEL|ℹ️ INFO|📞 SUPPORT)$"),
                 handle_reply_kb
