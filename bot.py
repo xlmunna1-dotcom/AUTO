@@ -301,5 +301,25 @@ async def main():
         await asyncio.sleep(3600)
 
 
+import threading
+from flask import Flask
+health_app = Flask(__name__)
+
+@health_app.route("/")
+def home():
+    return "Bot is running!", 200
+
+@health_app.route("/health")
+def health():
+    return "OK", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    health_app.run(host="0.0.0.0", port=port)
+
 if __name__ == "__main__":
+    # Flask health check আলাদা thread এ
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    # Bot main thread এ
     asyncio.run(main())
