@@ -1,5 +1,5 @@
 # ============================================================
-# FILE: app.py  — UPGRADED UI VERSION (HTML parse_mode + Colors)
+# FILE: app.py  — FINAL VERSION (Only Inline Colored Buttons)
 # Requirements: flask, telethon, psycopg2-binary, python-telegram-bot>=22.7
 # Run: python app.py
 # ============================================================
@@ -18,8 +18,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 import telegram
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -78,19 +77,9 @@ def progress_bar(current: int, total: int, length: int = 10) -> str:
     return f"[{bar}] {pct}%"
 
 def esc(text) -> str:
-    """HTML escape for dynamic user content"""
     return html.escape(str(text) if text is not None else "")
 
-def main_reply_keyboard(is_admin_user: bool = False) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton("🔑 GET NEW KEY")]]
-    if is_admin_user:
-        rows.append([KeyboardButton("⚙️ ADMIN PANEL")])
-    rows.append([KeyboardButton("ℹ️ INFO"), KeyboardButton("📞 SUPPORT")])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
-
 # ── Colored InlineKeyboardButton helper ──
-# style: "primary" = blue, "success" = green, "danger" = red
-# Requires python-telegram-bot >= 22.7 (Bot API 9.4+)
 def btn(text: str, callback_data: str = None, url: str = None,
         style: str = None) -> InlineKeyboardButton:
     kwargs = {"text": text}
@@ -340,7 +329,6 @@ def api_validate_key():
 #  TELEGRAM BOT HANDLERS
 # ══════════════════════════════════════════════════════════
 
-# ── /start ──
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user  = update.effective_user
     name  = esc(user.first_name or "বন্ধু")
@@ -348,96 +336,31 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     hours = _admin_free_key_hours["value"]
     admin = is_admin(user.id)
 
-    await update.message.reply_text(
-        "🔽 <b>নিচের মেনু থেকে অপশন বেছে নিন:</b>",
-        parse_mode="HTML",
-        reply_markup=main_reply_keyboard(admin)
-    )
-
-    inline_kb = [
-        [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
-        [
-            btn("ℹ️ Info",    callback_data="info",    style="primary"),
-            btn("📞 Support", callback_data="support", style="primary"),
-        ],
-    ]
-    if admin:
-        inline_kb.insert(1, [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")])
-
-    limit_line = "∞ Unlimited" if limit == 0 else f"{limit}টি / দিন"
-
+    # Reply keyboard সরানোর জন্য (যদি আগে থেকে থেকে যায়)
     await update.message.reply_text(
         f"{header(APP_NAME + ' License', '🛡️')}"
         f"👋 স্বাগতম, <b>{name}!</b>\n\n"
         f"┌─────────────────────\n"
-        f"│ 🔑  Key / দিন :  <b>{limit_line}</b>\n"
+        f"│ 🔑  Key / দিন :  <b>{'∞ Unlimited' if limit == 0 else f'{limit}টি / দিন'}</b>\n"
         f"│ ⏱️  মেয়াদ     :  <b>{hours} ঘন্টা</b>\n"
         f"│ 🔒  Device    :  একটি ফোন\n"
         f"└─────────────────────\n"
         f"{footer()}",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_kb)
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
+                (
+                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")]
+                    if admin else []
+                ),
+                [
+                    btn("ℹ️ Info",    callback_data="info",    style="primary"),
+                    btn("📞 Support", callback_data="support", style="primary"),
+                ],
+            ]
+        )
     )
-
-
-# ── Reply keyboard shortcut handler ──
-async def handle_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text  = update.message.text
-    user  = update.effective_user
-    admin = is_admin(user.id)
-
-    if text == "🔑 GET NEW KEY":
-        allowed, err_msg = check_and_increment_key_usage(user.id)
-        if not allowed:
-            await update.message.reply_text(
-                f"{header('LIMIT REACHED', '🚫')}{err_msg}\n{footer()}",
-                parse_mode="HTML"
-            )
-            return ConversationHandler.END
-
-        a = random.randint(10, 99)
-        b = random.randint(10, 99)
-        _captcha_pending[user.id] = (a + b, time.time() + 120)
-        await update.message.reply_text(
-            f"{header('CAPTCHA চ্যালেঞ্জ', '🤖')}"
-            f"🧮  <b>{a}  +  {b}  =  ?</b>\n\n"
-            f"✏️ সঠিক উত্তর পাঠান\n"
-            f"⏱️ সময় বাকি: <b>২ মিনিট</b>\n"
-            f"{divider()}"
-            f"<i>/cancel টাইপ করে বাতিল করুন</i>",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return CAPTCHA_STATE
-
-    elif text == "⚙️ ADMIN PANEL" and admin:
-        await _send_admin_panel_msg(update.message)
-
-    elif text == "ℹ️ INFO":
-        await update.message.reply_text(
-            f"{header('APP INFO', 'ℹ️')}"
-            f"📱 <b>App:</b> {esc(APP_NAME)}\n"
-            f"🤖 <b>Bot:</b> {esc(DEVELOPER_USERNAME)}\n"
-            f"🔗 <b>Link:</b> {esc(TG_BOT_LINK)}\n"
-            f"{divider()}"
-            f"🔒 প্রতিটি Key একটি Device-এ লক হয়\n"
-            f"⏳ মেয়াদ শেষে Key কাজ করবে না\n"
-            f"{footer()}",
-            parse_mode="HTML"
-        )
-
-    elif text == "📞 SUPPORT":
-        await update.message.reply_text(
-            f"{header('SUPPORT', '📞')}"
-            f"সমস্যায় পড়লে Developer-কে নক করুন:\n\n"
-            f"👤 {esc(DEVELOPER_USERNAME)}\n"
-            f"🔗 {esc(TG_BOT_LINK)}\n"
-            f"{footer()}",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[
-                btn("📩 Contact Dev", url=TG_BOT_LINK, style="primary")
-            ]])
-        )
 
 
 # ── GET NEW KEY (inline button) → CAPTCHA ──
@@ -481,8 +404,7 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not pending:
         await update.message.reply_text(
-            "⚠️ আগে /start দিয়ে শুরু করুন।",
-            reply_markup=main_reply_keyboard(is_admin(uid))
+            "⚠️ আগে /start দিয়ে শুরু করুন।"
         )
         return ConversationHandler.END
 
@@ -492,8 +414,7 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"{header('TIME OUT!', '⏰')}"
             f"CAPTCHA-র সময় শেষ।\n/start দিয়ে আবার চেষ্টা করুন।",
-            parse_mode="HTML",
-            reply_markup=main_reply_keyboard(is_admin(uid))
+            parse_mode="HTML"
         )
         return ConversationHandler.END
 
@@ -538,7 +459,9 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📋 <i>Key copy করে App-এ দিন</i>\n"
         f"{footer()}",
         parse_mode="HTML",
-        reply_markup=main_reply_keyboard(is_admin(uid))
+        reply_markup=InlineKeyboardMarkup(
+            [[btn("🔙 Back", callback_data="back_start", style="primary")]]
+        )
     )
     return ConversationHandler.END
 
@@ -595,13 +518,13 @@ async def cb_back_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     inline_kb = [
         [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
-        [
-            btn("ℹ️ Info",    callback_data="info",    style="primary"),
-            btn("📞 Support", callback_data="support", style="primary"),
-        ],
     ]
     if admin:
-        inline_kb.insert(1, [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")])
+        inline_kb.append([btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")])
+    inline_kb.append([
+        btn("ℹ️ Info",    callback_data="info",    style="primary"),
+        btn("📞 Support", callback_data="support", style="primary"),
+    ])
 
     await query.edit_message_text(
         f"{header(APP_NAME + ' License', '🛡️')}"
@@ -918,7 +841,10 @@ async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await query.edit_message_text(
             f"{header('KEYS LIST', '📋')}কোনো Key নেই।",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
+            )
         )
         return
     now   = int(time.time())
@@ -948,9 +874,8 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     _captcha_pending.pop(uid, None)
     await update.message.reply_text(
-        "❌ <b>বাতিল করা হয়েছে।</b>",
-        parse_mode="HTML",
-        reply_markup=main_reply_keyboard(is_admin(uid))
+        "❌ <b>বাতিল করা হয়েছে।</b>\n\n/start দিয়ে আবার শুরু করুন।",
+        parse_mode="HTML"
     )
     return ConversationHandler.END
 
@@ -973,10 +898,6 @@ def run_license_bot():
                     CallbackQueryHandler(cb_admin_set_duration, pattern="^admin_set_duration$"),
                     CallbackQueryHandler(cb_admin_set_limit,    pattern="^admin_set_limit$"),
                     CallbackQueryHandler(cb_admin_set_admin,    pattern="^admin_set_admin$"),
-                    MessageHandler(
-                        filters.TEXT & ~filters.COMMAND & filters.Regex("^🔑 GET NEW KEY$"),
-                        handle_reply_kb
-                    ),
                 ],
                 states={
                     CAPTCHA_STATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_captcha)],
@@ -996,11 +917,6 @@ def run_license_bot():
             bot_app.add_handler(CallbackQueryHandler(cb_info,           pattern="^info$"))
             bot_app.add_handler(CallbackQueryHandler(cb_support,        pattern="^support$"))
             bot_app.add_handler(conv)
-
-            bot_app.add_handler(MessageHandler(
-                filters.TEXT & ~filters.COMMAND & filters.Regex("^(⚙️ ADMIN PANEL|ℹ️ INFO|📞 SUPPORT)$"),
-                handle_reply_kb
-            ))
 
             print("[LICENSE BOT] ✅ Bot starting...", flush=True)
             await bot_app.initialize()
