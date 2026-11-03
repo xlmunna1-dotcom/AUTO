@@ -32,7 +32,7 @@ BOT             = "@Taskl1_bot"
 COOKIE_SELL_BOT = "@QuickTaskPay1bot"
 
 # ── LICENSE BOT CONFIG ──
-LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN", "9285384211:AAFmdMQcxF5kU0EUIXyRue8nBkrlD_4r6ak")
+LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN", "9285384211:AAEHiIGn9xy4_jIdy8w0RBnnrvAHp3Z6TMY")
 ADMIN_IDS          = list(map(int, os.environ.get("ADMIN_IDS", "8301781046").split(",")))
 DEVELOPER_USERNAME = os.environ.get("DEVELOPER_USERNAME", "@NEXEX_99")
 APP_NAME           = os.environ.get("APP_NAME", "SuperToolsX")
