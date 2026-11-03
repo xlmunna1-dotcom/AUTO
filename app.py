@@ -94,9 +94,8 @@ def btn(text: str, callback_data: str = None, url: str = None,
     else:
         kwargs["callback_data"] = callback_data or "noop"
     if style:
-        kwargs["style"] = style
+        kwargs["style"] = style   # এটাই মূল ফিক্স
     return InlineKeyboardButton(**kwargs)
-
 
 # ══════════════════════════════════════════════════════════
 #  DB SETUP
