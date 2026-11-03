@@ -1,5 +1,5 @@
 # ============================================================
-# FILE: app.py  — FINAL VERSION (Only Inline Colored Buttons)
+# FILE: app.py  — FINAL VERSION (Only Inline Colored Buttons + Timeout Fix)
 # Requirements: flask, telethon, psycopg2-binary, python-telegram-bot>=22.7
 # Run: python app.py
 # ============================================================
@@ -336,7 +336,6 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     hours = _admin_free_key_hours["value"]
     admin = is_admin(user.id)
 
-    # Reply keyboard সরানোর জন্য (যদি আগে থেকে থেকে যায়)
     await update.message.reply_text(
         f"{header(APP_NAME + ' License', '🛡️')}"
         f"👋 স্বাগতম, <b>{name}!</b>\n\n"
@@ -363,7 +362,6 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── GET NEW KEY (inline button) → CAPTCHA ──
 async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -403,9 +401,7 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pending = _captcha_pending.get(uid)
 
     if not pending:
-        await update.message.reply_text(
-            "⚠️ আগে /start দিয়ে শুরু করুন।"
-        )
+        await update.message.reply_text("⚠️ আগে /start দিয়ে শুরু করুন।")
         return ConversationHandler.END
 
     correct_ans, expiry = pending
@@ -466,7 +462,6 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── Info & Support inline ──
 async def cb_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -506,7 +501,6 @@ async def cb_support(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── Back ──
 async def cb_back_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -592,7 +586,6 @@ async def cb_admin_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _send_admin_panel_msg(query, edit=True)
 
 
-# ── CUSTOM KEY ──
 async def cb_admin_custom_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -642,7 +635,6 @@ async def handle_custom_key_days(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-# ── DURATION ──
 async def cb_admin_set_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -689,7 +681,6 @@ async def handle_set_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── SET LIMIT ──
 async def cb_admin_set_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -738,10 +729,6 @@ async def handle_set_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-
-# ══════════════════════════════════════════════════
-#  SET ADMIN
-# ══════════════════════════════════════════════════
 
 async def cb_admin_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -828,7 +815,6 @@ async def handle_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── ALL KEYS LIST ──
 async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -881,56 +867,95 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════════
-#  BOT RUNNER
+#  BOT RUNNER (With Timeout Fix + Infinite Retry)
 # ══════════════════════════════════════════════════
 def run_license_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def _run():
-        try:
-            bot_app = Application.builder().token(LICENSE_BOT_TOKEN).build()
+        bot_app = None
+        while True:  # infinite retry loop
+            try:
+                # Timeout বাড়িয়ে বিল্ড করা হলো
+                bot_app = (
+                    Application.builder()
+                    .token(LICENSE_BOT_TOKEN)
+                    .connect_timeout(30.0)
+                    .read_timeout(30.0)
+                    .write_timeout(30.0)
+                    .pool_timeout(30.0)
+                    .get_updates_read_timeout(30.0)
+                    .build()
+                )
 
-            conv = ConversationHandler(
-                entry_points=[
-                    CallbackQueryHandler(cb_get_new_key,        pattern="^get_new_key$"),
-                    CallbackQueryHandler(cb_admin_custom_key,   pattern="^admin_custom_key$"),
-                    CallbackQueryHandler(cb_admin_set_duration, pattern="^admin_set_duration$"),
-                    CallbackQueryHandler(cb_admin_set_limit,    pattern="^admin_set_limit$"),
-                    CallbackQueryHandler(cb_admin_set_admin,    pattern="^admin_set_admin$"),
-                ],
-                states={
-                    CAPTCHA_STATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_captcha)],
-                    CUSTOM_KEY_DAYS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_key_days)],
-                    USER_KEY_DURATION:[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_duration)],
-                    SET_LIMIT_STATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_limit)],
-                    SET_ADMIN_STATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_admin)],
-                },
-                fallbacks=[CommandHandler("cancel", cmd_cancel)],
-                allow_reentry=True,
-            )
+                conv = ConversationHandler(
+                    entry_points=[
+                        CallbackQueryHandler(cb_get_new_key,        pattern="^get_new_key$"),
+                        CallbackQueryHandler(cb_admin_custom_key,   pattern="^admin_custom_key$"),
+                        CallbackQueryHandler(cb_admin_set_duration, pattern="^admin_set_duration$"),
+                        CallbackQueryHandler(cb_admin_set_limit,    pattern="^admin_set_limit$"),
+                        CallbackQueryHandler(cb_admin_set_admin,    pattern="^admin_set_admin$"),
+                    ],
+                    states={
+                        CAPTCHA_STATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_captcha)],
+                        CUSTOM_KEY_DAYS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_key_days)],
+                        USER_KEY_DURATION:[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_duration)],
+                        SET_LIMIT_STATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_limit)],
+                        SET_ADMIN_STATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_admin)],
+                    },
+                    fallbacks=[CommandHandler("cancel", cmd_cancel)],
+                    allow_reentry=True,
+                )
 
-            bot_app.add_handler(CommandHandler("start", cmd_start))
-            bot_app.add_handler(CallbackQueryHandler(cb_admin_panel,    pattern="^admin_panel$"))
-            bot_app.add_handler(CallbackQueryHandler(cb_admin_list_keys,pattern="^admin_list_keys$"))
-            bot_app.add_handler(CallbackQueryHandler(cb_back_start,     pattern="^back_start$"))
-            bot_app.add_handler(CallbackQueryHandler(cb_info,           pattern="^info$"))
-            bot_app.add_handler(CallbackQueryHandler(cb_support,        pattern="^support$"))
-            bot_app.add_handler(conv)
+                bot_app.add_handler(CommandHandler("start", cmd_start))
+                bot_app.add_handler(CallbackQueryHandler(cb_admin_panel,    pattern="^admin_panel$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_admin_list_keys,pattern="^admin_list_keys$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_back_start,     pattern="^back_start$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_info,           pattern="^info$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_support,        pattern="^support$"))
+                bot_app.add_handler(conv)
 
-            print("[LICENSE BOT] ✅ Bot starting...", flush=True)
-            await bot_app.initialize()
-            await bot_app.start()
-            await bot_app.updater.start_polling(
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES,
-            )
-            print("[LICENSE BOT] ✅ Polling active!", flush=True)
-            while True:
-                await asyncio.sleep(3600)
-        except Exception as e:
-            print(f"[LICENSE BOT] ❌ Error: {e}", flush=True)
-            import traceback; traceback.print_exc()
+                print("[LICENSE BOT] ✅ Bot starting...", flush=True)
+
+                # Initialize with 5x retry
+                for attempt in range(5):
+                    try:
+                        await bot_app.initialize()
+                        print(f"[LICENSE BOT] ✅ Initialize OK (attempt {attempt+1})", flush=True)
+                        break
+                    except Exception as e:
+                        print(f"[LICENSE BOT] ⚠️ Initialize attempt {attempt+1} failed: {e}", flush=True)
+                        if attempt == 4:
+                            raise
+                        await asyncio.sleep(10)
+
+                await bot_app.start()
+                await bot_app.updater.start_polling(
+                    drop_pending_updates=True,
+                    allowed_updates=Update.ALL_TYPES,
+                )
+                print("[LICENSE BOT] ✅ Polling active!", flush=True)
+
+                # Keep alive forever
+                while True:
+                    await asyncio.sleep(3600)
+
+            except Exception as e:
+                print(f"[LICENSE BOT] ❌ Error: {e}", flush=True)
+                import traceback; traceback.print_exc()
+                # Cleanup
+                if bot_app:
+                    try:
+                        if bot_app.updater and bot_app.updater.running:
+                            await bot_app.updater.stop()
+                        if bot_app.running:
+                            await bot_app.stop()
+                        await bot_app.shutdown()
+                    except Exception:
+                        pass
+                print("[LICENSE BOT] 🔄 Restarting in 15 seconds...", flush=True)
+                await asyncio.sleep(15)
 
     try:
         loop.run_until_complete(_run())
@@ -941,7 +966,7 @@ def run_license_bot():
 
 
 # ══════════════════════════════════════════════════════════
-#  EXISTING FLASK ENDPOINTS (unchanged)
+#  EXISTING FLASK ENDPOINTS
 # ══════════════════════════════════════════════════════════
 
 @app.route("/send_otp", methods=["POST"])
