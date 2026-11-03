@@ -972,4 +972,12 @@ def home():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    # ১. টেলিগ্রাম লাইসেন্স বট চালু করুন (আলাদা থ্রেডে)
+    bot_thread = threading.Thread(target=run_license_bot, daemon=True)
+    bot_thread.start()
+
+    # ২. Render থেকে পোর্ট নিন, না পেলে 5000 ব্যবহার করুন
+    port = int(os.environ.get("PORT", 5000))
+    
+    # ৩. Flask App চালু করুন
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
