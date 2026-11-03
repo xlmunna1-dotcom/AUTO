@@ -263,7 +263,7 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ── MAIN ──
-def main():
+async def main():
     bot_app = Application.builder().token(LICENSE_BOT_TOKEN).build()
 
     conv = ConversationHandler(
@@ -287,8 +287,19 @@ def main():
     bot_app.add_handler(conv)
 
     print("✅ License Bot polling শুরু...", flush=True)
-    bot_app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
+    print("✅ Bot চলছে!", flush=True)
+
+    # চালু রাখো
+    while True:
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
