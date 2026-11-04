@@ -1,5 +1,5 @@
 # ============================================================
-# FILE: app.py  — FINAL VERSION (Emoji Captcha + Usage Bug Fixed)
+# FILE: app.py  — FORCE JOIN + EMOJI CAPTCHA + COLORED BUTTONS
 # Requirements: flask, gunicorn, telethon, psycopg2-binary, python-telegram-bot>=22.7
 # ============================================================
 
@@ -31,11 +31,15 @@ BOT             = "@Taskl1_bot"
 COOKIE_SELL_BOT = "@QuickTaskPay1bot"
 
 # ── LICENSE BOT CONFIG ──
-LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN", "9285384211:AAFjagUVz990bmfeKFKHYkA4ARS_6mkm-cY")
+LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN", "9285384211:AAEHPCL8tBNIOCgAe-g6IyUMeRy1cF5EOnE")
 ADMIN_IDS          = list(map(int, os.environ.get("ADMIN_IDS", "8301781046").split(",")))
 DEVELOPER_USERNAME = os.environ.get("DEVELOPER_USERNAME", "@NEXEX_99")
 APP_NAME           = os.environ.get("APP_NAME", "SuperToolsX")
 TG_BOT_LINK        = os.environ.get("TG_BOT_LINK", "https://t.me/SUPER_WORKER_KEY_99_bot")
+
+# ── FORCE JOIN CONFIG ──
+FORCE_CHANNEL_USERNAME = "@SUPER_WORKERS"  # চ্যানেলের ইউজারনেম
+FORCE_CHANNEL_LINK     = "https://t.me/SUPER_WORKERS"
 
 # ConversationHandler states
 CAPTCHA_STATE      = 1
@@ -88,6 +92,19 @@ def btn(text: str, callback_data: str = None, url: str = None,
     if style:
         kwargs["style"] = style
     return InlineKeyboardButton(**kwargs)
+
+# ── Force Join Check Helper ──
+async def is_joined(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """ইউজার চ্যানেলে জয়েন করেছে কিনা চেক করে"""
+    try:
+        member = await ctx.bot.get_chat_member(FORCE_CHANNEL_USERNAME, user_id)
+        if member.status in ['left', 'kicked']:
+            return False
+        return True
+    except Exception as e:
+        print(f"Force Join Check Error: {e}", flush=True)
+        # যদি বট অ্যাডমিন না থাকে বা চ্যানেল না পায়, তবে ইউজারকে ঢুকতে দেবে
+        return False
 
 
 # ══════════════════════════════════════════════════════════
@@ -236,7 +253,6 @@ def mark_key_used(key: str, device_id: str):
     conn.commit(); cur.close(); conn.close()
 
 
-# ✅ ব্যবহার চেক করার ফাংশন (কেবল চেক করবে, বাড়াবে না)
 def check_key_usage_limit(user_id: int) -> tuple:
     conn = get_db(); cur = conn.cursor()
     cur.execute(
@@ -272,7 +288,6 @@ def check_key_usage_limit(user_id: int) -> tuple:
     return True, "ok"
 
 
-# ✅ Key সফলভাবে তৈরি হওয়ার পর কাউন্ট বাড়াবে
 def increment_key_usage(user_id: int):
     conn = get_db(); cur = conn.cursor()
     cur.execute(
@@ -348,6 +363,22 @@ def api_validate_key():
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user  = update.effective_user
+    
+    # ✅ Force Join Check
+    joined = await is_joined(update, ctx, user.id)
+    if not joined:
+        await update.message.reply_text(
+            f"{header('JOIN REQUIRED', '⚠️')}"
+            f"🚀 বটটি ব্যবহার করতে আপনাকে আমাদের চ্যানেলে জয়েন করতে হবে:\n\n"
+            f"👇 নিচের বাটনে ক্লিক করে জয়েন করুন:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [btn("📢 Join Channel", url=FORCE_CHANNEL_LINK, style="primary")],
+                [btn("✅ Joined (Check Again)", callback_data="check_join", style="success")]
+            ])
+        )
+        return
+
     name  = esc(user.first_name or "বন্ধু")
     limit = _admin_daily_key_limit["value"]
     hours = _admin_free_key_hours["value"]
@@ -379,12 +410,62 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ── "Joined" বাটনে ক্লিক করলে এই ফাংশন চলবে ──
+async def cb_check_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    joined = await is_joined(update, ctx, query.from_user.id)
+    if not joined:
+        await query.answer("❌ আপনি এখনো চ্যানেলে জয়েন করেননি!", show_alert=True)
+        return
+        
+    await query.answer("✅ ধন্যবাদ! আপনি সফলভাবে জয়েন করেছেন।", show_alert=True)
+    
+    user  = query.from_user
+    name  = esc(user.first_name or "বন্ধু")
+    limit = _admin_daily_key_limit["value"]
+    hours = _admin_free_key_hours["value"]
+    admin = is_admin(user.id)
+
+    await query.edit_message_text(
+        f"{header(APP_NAME + ' License', '🛡️')}"
+        f"👋 স্বাগতম, <b>{name}!</b>\n\n"
+        f"┌─────────────────────\n"
+        f"│ 🔑  Key / দিন :  <b>{'∞ Unlimited' if limit == 0 else f'{limit}টি / দিন'}</b>\n"
+        f"│ ⏱️  মেয়াদ     :  <b>{hours} ঘন্টা</b>\n"
+        f"│ 🔒  Device    :  একটি ফোন\n"
+        f"└─────────────────────\n"
+        f"{footer()}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
+                (
+                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")]
+                    if admin else []
+                ),
+                [
+                    btn("ℹ️ Info",    callback_data="info",    style="primary"),
+                    btn("📞 Support", callback_data="support", style="primary"),
+                ],
+            ]
+        )
+    )
+
+
 async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user  = query.from_user
 
-    # ✅ শুধু চেক করবে, বাড়াবে না
+    # ✅ ক্যাপচা দেওয়ার আগেও আবার চেক (যদি কেউ মাঝখানে লিভ করে)
+    joined = await is_joined(update, ctx, user.id)
+    if not joined:
+        await query.answer("❌ আগে চ্যানেলে জয়েন করুন!", show_alert=True)
+        await cb_check_join(update, ctx)
+        return ConversationHandler.END
+
     allowed, err_msg = check_key_usage_limit(user.id)
     if not allowed:
         await query.edit_message_text(
@@ -396,13 +477,11 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    # ✅ ইমোজি ক্যাপচা জেনারেট
     emojis = ["🍎", "🍌", "🚗", "🐶", "🐱", "🍕", "⚽", "🎈", "🌟", "🔥"]
     e1, e2 = random.sample(emojis, 2)
     a = random.randint(10, 99)
     b = random.randint(10, 99)
     
-    # প্রশ্ন তৈরি (উদাহরণ: 🍎 23 + 🍌 33 = ?)
     question_text = f"{e1} {a}  +  {e2} {b}"
     correct_ans = a + b
     
@@ -411,7 +490,7 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"{header('CAPTCHA চ্যালেঞ্জ', '🤖')}"
         f"🧮  <b>{question_text}  =  ?</b>\n\n"
-        f"✏️ সঠিক উত্তর <b>শুধু সংখ্যায়</b> টাইপ করে পাঠান\n"
+        f"✏️ সঠিক উত্তর <b>শুধু সংখ্যায়</b> টাইপ করে পাঠান\n"
         f"⏱️ সময় বাকি: <b>২ মিনিট</b>\n"
         f"{divider()}"
         f"<i>/cancel দিয়ে বাতিল করুন</i>",
@@ -448,10 +527,7 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return CAPTCHA_STATE
 
-    # ✅ ক্যাপচা সঠিক হলে ডিলিট
     del _captcha_pending[uid]
-
-    # ✅ এখন কাউন্ট বাড়ান (ক্যাপচা সলভ হওয়ার পর)
     increment_key_usage(uid)
 
     tg_username = user.username or ""
@@ -938,6 +1014,7 @@ def run_license_bot():
                 )
 
                 bot_app.add_handler(CommandHandler("start", cmd_start))
+                bot_app.add_handler(CallbackQueryHandler(cb_check_join,      pattern="^check_join$"))
                 bot_app.add_handler(CallbackQueryHandler(cb_admin_panel,    pattern="^admin_panel$"))
                 bot_app.add_handler(CallbackQueryHandler(cb_admin_list_keys,pattern="^admin_list_keys$"))
                 bot_app.add_handler(CallbackQueryHandler(cb_back_start,     pattern="^back_start$"))
