@@ -178,24 +178,9 @@ def ensure_tables():
             id         SERIAL PRIMARY KEY,
             tg_user_id TEXT NOT NULL,
             twofa_key  TEXT NOT NULL,
-            cookie     TEXT,
             sold_at    BIGINT NOT NULL,
             UNIQUE(twofa_key)
         )
-    """)
-    # ★ FIX: পুরনো table এ cookie column না থাকলে যোগ করো
-    cur.execute("ALTER TABLE sold_keys ADD COLUMN IF NOT EXISTS cookie TEXT")
-    # ★ FIX: cookie এর উপরেও unique constraint দাও (যদি না থাকে)
-    cur.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'sold_keys_cookie_unique'
-            ) THEN
-                ALTER TABLE sold_keys ADD CONSTRAINT sold_keys_cookie_unique UNIQUE (cookie);
-            END IF;
-        END$$;
     """)
     conn.commit()
     cur.close()
@@ -1216,27 +1201,24 @@ def automate_sale():
     twofa_key  = str(data.get("twofa_key", "")).strip()
     cookie     = str(data.get("cookie", "")).strip()
 
-    # Input validation
     if not tg_user_id or not twofa_key or not cookie:
         return jsonify({"status": "error", "message": "tg_user_id, twofa_key, cookie দরকার।"}), 400
 
-    # ★ DUPLICATE SELL CHECK — একই twofa_key বা cookie আগে sold হয়েছে কিনা
+    # ★ Duplicate check  ← নতুন ৫ লাইন
     conn = get_db(); cur = conn.cursor()
-    cur.execute(
-        "SELECT id FROM sold_keys WHERE twofa_key = %s OR (cookie IS NOT NULL AND cookie = %s)",
-        (twofa_key, cookie)
-    )
-    already_sold = cur.fetchone()
+    cur.execute("SELECT id FROM sold_keys WHERE twofa_key = %s", (twofa_key,))
+    if cur.fetchone():
+        cur.close(); conn.close()
+        return jsonify({"status": "duplicate", "message": "এই key আগেই sell হয়েছে!"}), 409
     cur.close(); conn.close()
-    if already_sold:
-        print(f"[DUPLICATE BLOCKED] twofa_key={twofa_key[:6]}... or cookie already sold!", flush=True)
-        return jsonify({"status": "duplicate", "message": "এই key বা cookie আগেই sell হয়েছে!"}), 409
 
+    # এরপর আপনার পুরনো code (কোনো পরিবর্তন নেই)
     conn = get_db(); cur = conn.cursor()
     cur.execute(
         "SELECT session_string, api_id, api_hash, target_username FROM user_sessions WHERE user_id = %s",
         (tg_user_id,)
     )
+    # ... বাকি পুরনো code আগের মতোই
     row = cur.fetchone(); cur.close(); conn.close()
     if not row:
         return jsonify({"status": "error", "message": "User not found."}), 404
@@ -1315,25 +1297,18 @@ def automate_sale():
         sold = loop.run_until_complete(_sell())
         loop.close()
         if sold:
-            try:
-                conn2 = get_db(); cur2 = conn2.cursor()
-                # ★ আগে sold_keys এ save করো
-                cur2.execute("""
-                    INSERT INTO sold_keys (tg_user_id, twofa_key, cookie, sold_at)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (twofa_key) DO UPDATE SET cookie = EXCLUDED.cookie
-                """, (tg_user_id, twofa_key, cookie, int(time.time())))
-                # ★ তারপর sell_stats update করো
-                cur2.execute("""
-                    INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
-                    ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
-                """, (tg_user_id,))
-                conn2.commit()
-                cur2.close()
-                conn2.close()
-                print(f"[SOLD] ✅ saved to sold_keys: key={twofa_key[:6]}...", flush=True)
-            except Exception as db_err:
-                print(f"[DB ERROR] ❌ sold_keys insert failed: {db_err}", flush=True)
+            # ★ FIX: sold_keys এ save করো — duplicate prevent
+            conn2 = get_db(); cur2 = conn2.cursor()
+            cur2.execute("""
+                INSERT INTO sold_keys (tg_user_id, twofa_key, sold_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (twofa_key) DO NOTHING
+            """, (tg_user_id, twofa_key, int(time.time())))
+            cur2.execute("""
+                INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
+                ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
+            """, (tg_user_id,))
+            conn2.commit(); cur2.close(); conn2.close()
             return jsonify({"status": "success", "message": "Sale সম্পন্ন!"})
         return jsonify({"status": "timeout", "message": "Flow incomplete।"})
     except Exception as e:
