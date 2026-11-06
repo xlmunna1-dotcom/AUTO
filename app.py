@@ -38,7 +38,7 @@ APP_NAME           = os.environ.get("APP_NAME", "SuperToolsX")
 TG_BOT_LINK        = os.environ.get("TG_BOT_LINK", "https://t.me/SUPER_WORKER_KEY_99_bot")
 
 # ── FORCE JOIN CONFIG ──
-FORCE_CHANNEL_USERNAME = "@SUPER_WORKERS"  # চ্যানেলের ইউজারনেম
+FORCE_CHANNEL_USERNAME = "@SUPER_WORKERS"
 FORCE_CHANNEL_LINK     = "https://t.me/SUPER_WORKERS"
 
 # ConversationHandler states
@@ -82,6 +82,8 @@ def progress_bar(current: int, total: int, length: int = 10) -> str:
 def esc(text) -> str:
     return html.escape(str(text) if text is not None else "")
 
+# ★ FIX 1: btn() থেকে style parameter সরানো হয়েছে
+# Telegram InlineKeyboardButton এ style বলে কোনো parameter নেই — error দিত
 def btn(text: str, callback_data: str = None, url: str = None,
         style: str = None) -> InlineKeyboardButton:
     kwargs = {"text": text}
@@ -89,13 +91,13 @@ def btn(text: str, callback_data: str = None, url: str = None,
         kwargs["url"] = url
     else:
         kwargs["callback_data"] = callback_data or "noop"
-    if style:
-        kwargs["style"] = style
+    # style parameter ignore করা হচ্ছে — Telegram API support করে না
     return InlineKeyboardButton(**kwargs)
 
 # ── Force Join Check Helper ──
+# ★ FIX 2: Exception হলে True return করো
+# আগে False ছিল — bot admin না থাকলে সব user blocked হয়ে যেত
 async def is_joined(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """ইউজার চ্যানেলে জয়েন করেছে কিনা চেক করে"""
     try:
         member = await ctx.bot.get_chat_member(FORCE_CHANNEL_USERNAME, user_id)
         if member.status in ['left', 'kicked']:
@@ -103,8 +105,7 @@ async def is_joined(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id: int
         return True
     except Exception as e:
         print(f"Force Join Check Error: {e}", flush=True)
-        # যদি বট অ্যাডমিন না থাকে বা চ্যানেল না পায়, তবে ইউজারকে ঢুকতে দেবে
-        return False
+        return True  # ★ FIX: False → True (bot admin না থাকলে ঢুকতে দেবে)
 
 
 # ══════════════════════════════════════════════════════════
@@ -169,6 +170,16 @@ def ensure_tables():
             user_id      TEXT PRIMARY KEY,
             key_count    INTEGER DEFAULT 0,
             last_reset   BIGINT DEFAULT 0
+        )
+    """)
+    # ★ FIX 3: sold_keys table — duplicate sell prevention এর জন্য
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sold_keys (
+            id         SERIAL PRIMARY KEY,
+            tg_user_id TEXT NOT NULL,
+            twofa_key  TEXT NOT NULL,
+            sold_at    BIGINT NOT NULL,
+            UNIQUE(twofa_key)
         )
     """)
     conn.commit()
@@ -363,8 +374,7 @@ def api_validate_key():
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user  = update.effective_user
-    
-    # ✅ Force Join Check
+
     joined = await is_joined(update, ctx, user.id)
     if not joined:
         await update.message.reply_text(
@@ -373,8 +383,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"👇 নিচের বাটনে ক্লিক করে জয়েন করুন:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [btn("📢 Join Channel", url=FORCE_CHANNEL_LINK, style="primary")],
-                [btn("✅ Joined (Check Again)", callback_data="check_join", style="success")]
+                [btn("📢 Join Channel", url=FORCE_CHANNEL_LINK)],
+                [btn("✅ Joined (Check Again)", callback_data="check_join")]
             ])
         )
         return
@@ -396,32 +406,31 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [
-                [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
+                [btn("🔑  GET NEW KEY", callback_data="get_new_key")],
                 (
-                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")]
+                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel")]
                     if admin else []
                 ),
                 [
-                    btn("ℹ️ Info",    callback_data="info",    style="primary"),
-                    btn("📞 Support", callback_data="support", style="primary"),
+                    btn("ℹ️ Info",    callback_data="info"),
+                    btn("📞 Support", callback_data="support"),
                 ],
             ]
         )
     )
 
 
-# ── "Joined" বাটনে ক্লিক করলে এই ফাংশন চলবে ──
 async def cb_check_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     joined = await is_joined(update, ctx, query.from_user.id)
     if not joined:
         await query.answer("❌ আপনি এখনো চ্যানেলে জয়েন করেননি!", show_alert=True)
         return
-        
+
     await query.answer("✅ ধন্যবাদ! আপনি সফলভাবে জয়েন করেছেন।", show_alert=True)
-    
+
     user  = query.from_user
     name  = esc(user.first_name or "বন্ধু")
     limit = _admin_daily_key_limit["value"]
@@ -440,14 +449,14 @@ async def cb_check_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [
-                [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
+                [btn("🔑  GET NEW KEY", callback_data="get_new_key")],
                 (
-                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")]
+                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel")]
                     if admin else []
                 ),
                 [
-                    btn("ℹ️ Info",    callback_data="info",    style="primary"),
-                    btn("📞 Support", callback_data="support", style="primary"),
+                    btn("ℹ️ Info",    callback_data="info"),
+                    btn("📞 Support", callback_data="support"),
                 ],
             ]
         )
@@ -459,7 +468,6 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user  = query.from_user
 
-    # ✅ ক্যাপচা দেওয়ার আগেও আবার চেক (যদি কেউ মাঝখানে লিভ করে)
     joined = await is_joined(update, ctx, user.id)
     if not joined:
         await query.answer("❌ আগে চ্যানেলে জয়েন করুন!", show_alert=True)
@@ -472,7 +480,7 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"{header('LIMIT REACHED', '🚫')}{err_msg}\n{footer()}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
-                [[btn("🔙 Back", callback_data="back_start", style="primary")]]
+                [[btn("🔙 Back", callback_data="back_start")]]
             )
         )
         return ConversationHandler.END
@@ -481,10 +489,10 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     e1, e2 = random.sample(emojis, 2)
     a = random.randint(10, 99)
     b = random.randint(10, 99)
-    
+
     question_text = f"{e1} {a}  +  {e2} {b}"
     correct_ans = a + b
-    
+
     _captcha_pending[user.id] = (correct_ans, time.time() + 120)
 
     await query.edit_message_text(
@@ -562,7 +570,7 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Back", callback_data="back_start", style="primary")]]
+            [[btn("🔙 Back", callback_data="back_start")]]
         )
     )
     return ConversationHandler.END
@@ -585,7 +593,7 @@ async def cb_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Back", callback_data="back_start", style="primary")]]
+            [[btn("🔙 Back", callback_data="back_start")]]
         )
     )
 
@@ -601,8 +609,8 @@ async def cb_support(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [btn("📩 Contact Dev", url=TG_BOT_LINK, style="primary")],
-            [btn("🔙 Back", callback_data="back_start", style="primary")],
+            [btn("📩 Contact Dev", url=TG_BOT_LINK)],
+            [btn("🔙 Back", callback_data="back_start")],
         ])
     )
 
@@ -617,13 +625,13 @@ async def cb_back_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     limit_line = "∞ Unlimited" if limit == 0 else f"{limit}টি / দিন"
 
     inline_kb = [
-        [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
+        [btn("🔑  GET NEW KEY", callback_data="get_new_key")],
     ]
     if admin:
-        inline_kb.append([btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="danger")])
+        inline_kb.append([btn("⚙️  ADMIN PANEL", callback_data="admin_panel")])
     inline_kb.append([
-        btn("ℹ️ Info",    callback_data="info",    style="primary"),
-        btn("📞 Support", callback_data="support", style="primary"),
+        btn("ℹ️ Info",    callback_data="info"),
+        btn("📞 Support", callback_data="support"),
     ])
 
     await query.edit_message_text(
@@ -655,17 +663,17 @@ async def _send_admin_panel_msg(msg_obj, edit=False):
 
     keyboard = [
         [
-            btn("🔐 Custom Key", callback_data="admin_custom_key",   style="success"),
-            btn("⏱️ Duration",   callback_data="admin_set_duration", style="primary"),
+            btn("🔐 Custom Key", callback_data="admin_custom_key"),
+            btn("⏱️ Duration",   callback_data="admin_set_duration"),
         ],
         [
-            btn("🚦 Set Limit",  callback_data="admin_set_limit",    style="primary"),
-            btn("📋 Keys List",  callback_data="admin_list_keys",    style="primary"),
+            btn("🚦 Set Limit",  callback_data="admin_set_limit"),
+            btn("📋 Keys List",  callback_data="admin_list_keys"),
         ],
         [
-            btn("👑 SET ADMIN",  callback_data="admin_set_admin",    style="danger"),
+            btn("👑 SET ADMIN",  callback_data="admin_set_admin"),
         ],
-        [btn("🔙 Back", callback_data="back_start", style="primary")],
+        [btn("🔙 Back", callback_data="back_start")],
     ]
     text = (
         f"{header('ADMIN PANEL', '⚙️')}"
@@ -735,7 +743,7 @@ async def handle_custom_key_days(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
         )
     )
     return ConversationHandler.END
@@ -781,7 +789,7 @@ async def handle_set_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"User এখন থেকে <b>{hours} ঘন্টার</b> Key পাবে।",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
         )
     )
     return ConversationHandler.END
@@ -830,7 +838,7 @@ async def handle_set_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🔄 ২৪ ঘন্টা পর Automatic Reset।",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
         )
     )
     return ConversationHandler.END
@@ -897,7 +905,7 @@ async def handle_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>{safe_name}</b> ইতিমধ্যে Admin আছে!",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
-                [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
+                [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
             )
         )
         return ConversationHandler.END
@@ -915,7 +923,7 @@ async def handle_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
         )
     )
     return ConversationHandler.END
@@ -935,7 +943,7 @@ async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"{header('KEYS LIST', '📋')}কোনো Key নেই।",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
-                [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
+                [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
             )
         )
         return
@@ -957,7 +965,7 @@ async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "\n".join(lines) + footer(),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="primary")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
         )
     )
 
@@ -1015,11 +1023,11 @@ def run_license_bot():
 
                 bot_app.add_handler(CommandHandler("start", cmd_start))
                 bot_app.add_handler(CallbackQueryHandler(cb_check_join,      pattern="^check_join$"))
-                bot_app.add_handler(CallbackQueryHandler(cb_admin_panel,    pattern="^admin_panel$"))
-                bot_app.add_handler(CallbackQueryHandler(cb_admin_list_keys,pattern="^admin_list_keys$"))
-                bot_app.add_handler(CallbackQueryHandler(cb_back_start,     pattern="^back_start$"))
-                bot_app.add_handler(CallbackQueryHandler(cb_info,           pattern="^info$"))
-                bot_app.add_handler(CallbackQueryHandler(cb_support,        pattern="^support$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_admin_panel,     pattern="^admin_panel$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_admin_list_keys, pattern="^admin_list_keys$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_back_start,      pattern="^back_start$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_info,            pattern="^info$"))
+                bot_app.add_handler(CallbackQueryHandler(cb_support,         pattern="^support$"))
                 bot_app.add_handler(conv)
 
                 print("[LICENSE BOT] ✅ Bot starting...", flush=True)
@@ -1074,10 +1082,13 @@ def run_license_bot():
 
 @app.route("/send_otp", methods=["POST"])
 def send_otp():
-    data     = request.json
-    api_id   = int(data["api_id"])
-    api_hash = data["api_hash"]
-    phone    = data["phone"]
+    data     = request.get_json(silent=True) or {}
+    api_id   = int(data.get("api_id", 0))
+    api_hash = data.get("api_hash", "")
+    phone    = data.get("phone", "")
+
+    if not api_id or not api_hash or not phone:
+        return jsonify({"status": "error", "message": "api_id, api_hash, phone দরকার।"}), 400
 
     async def _send():
         client = TelegramClient(StringSession(), api_id, api_hash)
@@ -1109,11 +1120,14 @@ def send_otp():
 
 @app.route("/verify_otp", methods=["POST"])
 def verify_otp():
-    data            = request.json
-    phone           = data["phone"]
-    otp             = data["otp"]
-    tg_user_id      = data["tg_user_id"]
-    target_username = data["target_username"]
+    data            = request.get_json(silent=True) or {}
+    phone           = data.get("phone", "")
+    otp             = data.get("otp", "")
+    tg_user_id      = data.get("tg_user_id", "")
+    target_username = data.get("target_username", "")
+
+    if not phone or not otp or not tg_user_id:
+        return jsonify({"status": "error", "message": "phone, otp, tg_user_id দরকার।"}), 400
 
     conn = get_db(); cur = conn.cursor()
     cur.execute(
@@ -1154,12 +1168,26 @@ def verify_otp():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+# ★ FIX 4: /automate_sale — Duplicate prevention + Session auth check + Input validation
 @app.route("/automate_sale", methods=["POST"])
 def automate_sale():
-    data       = request.json
-    tg_user_id = data["tg_user_id"]
-    twofa_key  = data["twofa_key"]
-    cookie     = data["cookie"]
+    data       = request.get_json(silent=True) or {}
+    tg_user_id = str(data.get("tg_user_id", "")).strip()
+    twofa_key  = str(data.get("twofa_key", "")).strip()
+    cookie     = str(data.get("cookie", "")).strip()
+
+    # Input validation
+    if not tg_user_id or not twofa_key or not cookie:
+        return jsonify({"status": "error", "message": "tg_user_id, twofa_key, cookie দরকার।"}), 400
+
+    # ★ DUPLICATE SELL CHECK — একই twofa_key আগে sold হয়েছে কিনা
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT id FROM sold_keys WHERE twofa_key = %s", (twofa_key,))
+    already_sold = cur.fetchone()
+    cur.close(); conn.close()
+    if already_sold:
+        print(f"[DUPLICATE BLOCKED] twofa_key={twofa_key[:6]}... already sold!", flush=True)
+        return jsonify({"status": "duplicate", "message": "এই key আগেই sell হয়েছে!"}), 409
 
     conn = get_db(); cur = conn.cursor()
     cur.execute(
@@ -1175,6 +1203,12 @@ def automate_sale():
     async def _sell():
         client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
         await client.connect()
+
+        # ★ FIX: Session authorize check
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise RuntimeError("Session expire হয়েছে। আবার connect করুন।")
+
         sold = False
         step = {"current": 0}
         too_often_retry = {"count": 0, "max": 5}
@@ -1184,6 +1218,7 @@ def automate_sale():
             nonlocal sold
             msg  = event.message
             text = msg.text or ""
+            if sold: return
             if "too often" in text.lower() or "please wait" in text.lower():
                 import re
                 nums = re.findall(r'\d+', text)
@@ -1220,7 +1255,8 @@ def automate_sale():
                     await client.send_message(BOT, "✅ Account registered")
             elif "report has been received" in text.lower() and step["current"] == 7:
                 step["current"] = 8; sold = True
-                await client.send_message(target_username, f"🎉 Account Sold!\n2FA: {twofa_key}")
+                if target_username:
+                    await client.send_message(target_username, f"🎉 Account Sold!\n2FA: {twofa_key}")
 
         await client.send_message(BOT, "/start")
         for _ in range(600):
@@ -1236,7 +1272,13 @@ def automate_sale():
         sold = loop.run_until_complete(_sell())
         loop.close()
         if sold:
+            # ★ FIX: sold_keys এ save করো — duplicate prevent
             conn2 = get_db(); cur2 = conn2.cursor()
+            cur2.execute("""
+                INSERT INTO sold_keys (tg_user_id, twofa_key, sold_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (twofa_key) DO NOTHING
+            """, (tg_user_id, twofa_key, int(time.time())))
             cur2.execute("""
                 INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
                 ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
@@ -1370,7 +1412,7 @@ def automate_cookie_sale():
 
 @app.route("/check_session", methods=["POST"])
 def check_session():
-    data       = request.json
+    data       = request.get_json(silent=True) or {}
     tg_user_id = data.get("tg_user_id", "")
     if not tg_user_id:
         return jsonify({"status": "invalid"}), 400
