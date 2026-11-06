@@ -1315,18 +1315,25 @@ def automate_sale():
         sold = loop.run_until_complete(_sell())
         loop.close()
         if sold:
-            # ★ FIX: sold_keys এ twofa_key + cookie দুটোই save করো — duplicate prevent
-            conn2 = get_db(); cur2 = conn2.cursor()
-            cur2.execute("""
-                INSERT INTO sold_keys (tg_user_id, twofa_key, cookie, sold_at)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (twofa_key) DO UPDATE SET cookie = EXCLUDED.cookie
-            """, (tg_user_id, twofa_key, cookie, int(time.time())))
-            cur2.execute("""
-                INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
-                ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
-            """, (tg_user_id,))
-            conn2.commit(); cur2.close(); conn2.close()
+            try:
+                conn2 = get_db(); cur2 = conn2.cursor()
+                # ★ আগে sold_keys এ save করো
+                cur2.execute("""
+                    INSERT INTO sold_keys (tg_user_id, twofa_key, cookie, sold_at)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (twofa_key) DO UPDATE SET cookie = EXCLUDED.cookie
+                """, (tg_user_id, twofa_key, cookie, int(time.time())))
+                # ★ তারপর sell_stats update করো
+                cur2.execute("""
+                    INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
+                    ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
+                """, (tg_user_id,))
+                conn2.commit()
+                cur2.close()
+                conn2.close()
+                print(f"[SOLD] ✅ saved to sold_keys: key={twofa_key[:6]}...", flush=True)
+            except Exception as db_err:
+                print(f"[DB ERROR] ❌ sold_keys insert failed: {db_err}", flush=True)
             return jsonify({"status": "success", "message": "Sale সম্পন্ন!"})
         return jsonify({"status": "timeout", "message": "Flow incomplete।"})
     except Exception as e:
