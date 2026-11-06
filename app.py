@@ -178,9 +178,24 @@ def ensure_tables():
             id         SERIAL PRIMARY KEY,
             tg_user_id TEXT NOT NULL,
             twofa_key  TEXT NOT NULL,
+            cookie     TEXT,
             sold_at    BIGINT NOT NULL,
             UNIQUE(twofa_key)
         )
+    """)
+    # ★ FIX: পুরনো table এ cookie column না থাকলে যোগ করো
+    cur.execute("ALTER TABLE sold_keys ADD COLUMN IF NOT EXISTS cookie TEXT")
+    # ★ FIX: cookie এর উপরেও unique constraint দাও (যদি না থাকে)
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'sold_keys_cookie_unique'
+            ) THEN
+                ALTER TABLE sold_keys ADD CONSTRAINT sold_keys_cookie_unique UNIQUE (cookie);
+            END IF;
+        END$$;
     """)
     conn.commit()
     cur.close()
@@ -1205,14 +1220,17 @@ def automate_sale():
     if not tg_user_id or not twofa_key or not cookie:
         return jsonify({"status": "error", "message": "tg_user_id, twofa_key, cookie দরকার।"}), 400
 
-    # ★ DUPLICATE SELL CHECK — একই twofa_key আগে sold হয়েছে কিনা
+    # ★ DUPLICATE SELL CHECK — একই twofa_key বা cookie আগে sold হয়েছে কিনা
     conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT id FROM sold_keys WHERE twofa_key = %s", (twofa_key,))
+    cur.execute(
+        "SELECT id FROM sold_keys WHERE twofa_key = %s OR (cookie IS NOT NULL AND cookie = %s)",
+        (twofa_key, cookie)
+    )
     already_sold = cur.fetchone()
     cur.close(); conn.close()
     if already_sold:
-        print(f"[DUPLICATE BLOCKED] twofa_key={twofa_key[:6]}... already sold!", flush=True)
-        return jsonify({"status": "duplicate", "message": "এই key আগেই sell হয়েছে!"}), 409
+        print(f"[DUPLICATE BLOCKED] twofa_key={twofa_key[:6]}... or cookie already sold!", flush=True)
+        return jsonify({"status": "duplicate", "message": "এই key বা cookie আগেই sell হয়েছে!"}), 409
 
     conn = get_db(); cur = conn.cursor()
     cur.execute(
@@ -1297,13 +1315,13 @@ def automate_sale():
         sold = loop.run_until_complete(_sell())
         loop.close()
         if sold:
-            # ★ FIX: sold_keys এ save করো — duplicate prevent
+            # ★ FIX: sold_keys এ twofa_key + cookie দুটোই save করো — duplicate prevent
             conn2 = get_db(); cur2 = conn2.cursor()
             cur2.execute("""
-                INSERT INTO sold_keys (tg_user_id, twofa_key, sold_at)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (twofa_key) DO NOTHING
-            """, (tg_user_id, twofa_key, int(time.time())))
+                INSERT INTO sold_keys (tg_user_id, twofa_key, cookie, sold_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (twofa_key) DO UPDATE SET cookie = EXCLUDED.cookie
+            """, (tg_user_id, twofa_key, cookie, int(time.time())))
             cur2.execute("""
                 INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
                 ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
