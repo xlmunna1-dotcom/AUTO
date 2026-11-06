@@ -1043,15 +1043,40 @@ def run_license_bot():
                             raise
                         await asyncio.sleep(10)
 
+                # ★ FIX: পুরানো webhook/session clear করো — Conflict error ঠেকাতে
+                try:
+                    await bot_app.bot.delete_webhook(drop_pending_updates=True)
+                    print("[LICENSE BOT] ✅ Webhook cleared.", flush=True)
+                except Exception as e:
+                    print(f"[LICENSE BOT] ⚠️ Webhook clear failed (ok): {e}", flush=True)
+
+                # ★ FIX: Conflict হলে ৩০ সেকেন্ড অপেক্ষা করো — পুরানো instance বন্ধ হওয়ার জন্য
+                await asyncio.sleep(30)
+
                 await bot_app.start()
                 await bot_app.updater.start_polling(
                     drop_pending_updates=True,
                     allowed_updates=Update.ALL_TYPES,
+                    error_callback=lambda err: print(f"[LICENSE BOT] ⚠️ Poll error: {err}", flush=True),
                 )
                 print("[LICENSE BOT] ✅ Polling active!", flush=True)
 
                 while True:
                     await asyncio.sleep(3600)
+
+            except telegram.error.Conflict as e:
+                # ★ FIX: Conflict error — পুরানো instance চলছে, বেশি অপেক্ষা করো
+                print(f"[LICENSE BOT] ⚠️ Conflict detected, waiting 60s for old instance to die: {e}", flush=True)
+                if bot_app:
+                    try:
+                        if bot_app.updater and bot_app.updater.running:
+                            await bot_app.updater.stop()
+                        if bot_app.running:
+                            await bot_app.stop()
+                        await bot_app.shutdown()
+                    except Exception:
+                        pass
+                await asyncio.sleep(60)
 
             except Exception as e:
                 print(f"[LICENSE BOT] ❌ Error: {e}", flush=True)
