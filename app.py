@@ -82,16 +82,21 @@ def progress_bar(current: int, total: int, length: int = 10) -> str:
 def esc(text) -> str:
     return html.escape(str(text) if text is not None else "")
 
-# ★ FIX 1: btn() থেকে style parameter সরানো হয়েছে
-# Telegram InlineKeyboardButton এ style বলে কোনো parameter নেই — error দিত
 def btn(text: str, callback_data: str = None, url: str = None,
         style: str = None) -> InlineKeyboardButton:
+    # style অনুযায়ী button text এ color emoji যোগ করো
+    color_map = {
+        "success": "🟢",
+        "danger" : "🔴",
+        "primary": "🔵",
+    }
+    if style and style in color_map:
+        text = color_map[style] + " " + text
     kwargs = {"text": text}
     if url:
         kwargs["url"] = url
     else:
         kwargs["callback_data"] = callback_data or "noop"
-    # style parameter ignore করা হচ্ছে — Telegram API support করে না
     return InlineKeyboardButton(**kwargs)
 
 # ── Force Join Check Helper ──
