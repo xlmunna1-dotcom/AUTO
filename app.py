@@ -383,8 +383,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"👇 নিচের বাটনে ক্লিক করে জয়েন করুন:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [btn("📢 Join Channel", url=FORCE_CHANNEL_LINK)],
-                [btn("✅ Joined (Check Again)", callback_data="check_join")]
+                [btn("📢 Join Channel", url=FORCE_CHANNEL_LINK, style="success")],
+                [btn("✅ Joined (Check Again)", callback_data="check_join", style="success")]
             ])
         )
         return
@@ -406,14 +406,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [
-                [btn("🔑  GET NEW KEY", callback_data="get_new_key")],
+                [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
                 (
-                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel")]
+                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="primary")]
                     if admin else []
                 ),
                 [
-                    btn("ℹ️ Info",    callback_data="info"),
-                    btn("📞 Support", callback_data="support"),
+                    btn("ℹ️ Info", callback_data="info", style="primary"),
+                    btn("📞 Support", callback_data="support", style="primary"),
                 ],
             ]
         )
@@ -449,14 +449,14 @@ async def cb_check_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             [
-                [btn("🔑  GET NEW KEY", callback_data="get_new_key")],
+                [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
                 (
-                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel")]
+                    [btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="primary")]
                     if admin else []
                 ),
                 [
-                    btn("ℹ️ Info",    callback_data="info"),
-                    btn("📞 Support", callback_data="support"),
+                    btn("ℹ️ Info", callback_data="info", style="primary"),
+                    btn("📞 Support", callback_data="support", style="primary"),
                 ],
             ]
         )
@@ -480,7 +480,7 @@ async def cb_get_new_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"{header('LIMIT REACHED', '🚫')}{err_msg}\n{footer()}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
-                [[btn("🔙 Back", callback_data="back_start")]]
+                [[btn("🔙 Back", callback_data="back_start", style="danger")]]
             )
         )
         return ConversationHandler.END
@@ -570,7 +570,7 @@ async def handle_captcha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Back", callback_data="back_start")]]
+            [[btn("🔙 Back", callback_data="back_start", style="danger")]]
         )
     )
     return ConversationHandler.END
@@ -593,7 +593,7 @@ async def cb_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Back", callback_data="back_start")]]
+            [[btn("🔙 Back", callback_data="back_start", style="danger")]]
         )
     )
 
@@ -609,8 +609,8 @@ async def cb_support(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [btn("📩 Contact Dev", url=TG_BOT_LINK)],
-            [btn("🔙 Back", callback_data="back_start")],
+            [btn("📩 Contact Dev", url=TG_BOT_LINK, style="primary")],
+            [btn("🔙 Back", callback_data="back_start", style="danger")],
         ])
     )
 
@@ -625,13 +625,13 @@ async def cb_back_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     limit_line = "∞ Unlimited" if limit == 0 else f"{limit}টি / দিন"
 
     inline_kb = [
-        [btn("🔑  GET NEW KEY", callback_data="get_new_key")],
+        [btn("🔑  GET NEW KEY", callback_data="get_new_key", style="success")],
     ]
     if admin:
-        inline_kb.append([btn("⚙️  ADMIN PANEL", callback_data="admin_panel")])
+        inline_kb.append([btn("⚙️  ADMIN PANEL", callback_data="admin_panel", style="primary")])
     inline_kb.append([
-        btn("ℹ️ Info",    callback_data="info"),
-        btn("📞 Support", callback_data="support"),
+        btn("ℹ️ Info", callback_data="info", style="primary"),
+        btn("📞 Support", callback_data="support", style="primary"),
     ])
 
     await query.edit_message_text(
@@ -663,17 +663,17 @@ async def _send_admin_panel_msg(msg_obj, edit=False):
 
     keyboard = [
         [
-            btn("🔐 Custom Key", callback_data="admin_custom_key"),
-            btn("⏱️ Duration",   callback_data="admin_set_duration"),
+            btn("🔐 Custom Key", callback_data="admin_custom_key", style="success"),
+            btn("⏱️ Duration", callback_data="admin_set_duration", style="primary"),
         ],
         [
-            btn("🚦 Set Limit",  callback_data="admin_set_limit"),
-            btn("📋 Keys List",  callback_data="admin_list_keys"),
+            btn("🚦 Set Limit", callback_data="admin_set_limit", style="primary"),
+            btn("📋 Keys List", callback_data="admin_list_keys", style="primary"),
         ],
         [
-            btn("👑 SET ADMIN",  callback_data="admin_set_admin"),
+            btn("👑 SET ADMIN", callback_data="admin_set_admin", style="danger"),
         ],
-        [btn("🔙 Back", callback_data="back_start")],
+        [btn("🔙 Back", callback_data="back_start", style="danger")],
     ]
     text = (
         f"{header('ADMIN PANEL', '⚙️')}"
@@ -743,7 +743,7 @@ async def handle_custom_key_days(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="danger")]]
         )
     )
     return ConversationHandler.END
@@ -789,7 +789,7 @@ async def handle_set_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"User এখন থেকে <b>{hours} ঘন্টার</b> Key পাবে।",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="danger")]]
         )
     )
     return ConversationHandler.END
@@ -838,7 +838,7 @@ async def handle_set_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🔄 ২৪ ঘন্টা পর Automatic Reset।",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="danger")]]
         )
     )
     return ConversationHandler.END
@@ -905,7 +905,7 @@ async def handle_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>{safe_name}</b> ইতিমধ্যে Admin আছে!",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
-                [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
+                [[btn("🔙 Admin Panel", callback_data="admin_panel", style="danger")]]
             )
         )
         return ConversationHandler.END
@@ -923,7 +923,7 @@ async def handle_set_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{footer()}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="danger")]]
         )
     )
     return ConversationHandler.END
@@ -943,7 +943,7 @@ async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"{header('KEYS LIST', '📋')}কোনো Key নেই।",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
-                [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
+                [[btn("🔙 Admin Panel", callback_data="admin_panel", style="danger")]]
             )
         )
         return
@@ -965,7 +965,7 @@ async def cb_admin_list_keys(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "\n".join(lines) + footer(),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            [[btn("🔙 Admin Panel", callback_data="admin_panel")]]
+            [[btn("🔙 Admin Panel", callback_data="admin_panel", style="danger")]]
         )
     )
 
