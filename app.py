@@ -84,19 +84,14 @@ def esc(text) -> str:
 
 def btn(text: str, callback_data: str = None, url: str = None,
         style: str = None) -> InlineKeyboardButton:
-    # style অনুযায়ী button text এ color emoji যোগ করো
-    color_map = {
-        "success": "🟢",
-        "danger" : "🔴",
-        "primary": "🔵",
-    }
-    if style and style in color_map:
-        text = color_map[style] + " " + text
     kwargs = {"text": text}
     if url:
         kwargs["url"] = url
     else:
         kwargs["callback_data"] = callback_data or "noop"
+    # ✅ Bot API 9.4 — real button color (success=green / danger=red / primary=blue)
+    if style in ("success", "danger", "primary"):
+        kwargs["style"] = style
     return InlineKeyboardButton(**kwargs)
 
 # ── Force Join Check Helper ──
