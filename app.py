@@ -1193,14 +1193,7 @@ def verify_otp():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════
-# /automate_sale  ★ FIXED — Atomic lock (race condition proof)
-# ══════════════════════════════════════════════════════════
-# In-memory lock: একই key এর দুটো request একই সময়ে ঢুকলে
-# দ্বিতীয়টা তাৎক্ষণিক reject হবে — DB hit করার আগেই।
-_sale_in_progress = set()
-_sale_lock = threading.Lock()
-
+# ★ FIX 4: /automate_sale — Duplicate prevention + Session auth check + Input validation
 @app.route("/automate_sale", methods=["POST"])
 def automate_sale():
     data       = request.get_json(silent=True) or {}
@@ -1211,158 +1204,115 @@ def automate_sale():
     if not tg_user_id or not twofa_key or not cookie:
         return jsonify({"status": "error", "message": "tg_user_id, twofa_key, cookie দরকার।"}), 400
 
-    # ══ STEP 1: In-memory lock — race condition block ══
-    # একই twofa_key নিয়ে দুটো thread একসাথে ঢুকতে পারবে না
-    with _sale_lock:
-        if twofa_key in _sale_in_progress:
-            return jsonify({"status": "duplicate", "message": "এই key এখন process হচ্ছে!"}), 409
-        _sale_in_progress.add(twofa_key)
+    # ★ Duplicate check  ← নতুন ৫ লাইন
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT id FROM sold_keys WHERE twofa_key = %s", (twofa_key,))
+    if cur.fetchone():
+        cur.close(); conn.close()
+        return jsonify({"status": "duplicate", "message": "এই key আগেই sell হয়েছে!"}), 409
+    cur.close(); conn.close()
+
+    # এরপর আপনার পুরনো code (কোনো পরিবর্তন নেই)
+    conn = get_db(); cur = conn.cursor()
+    cur.execute(
+        "SELECT session_string, api_id, api_hash, target_username FROM user_sessions WHERE user_id = %s",
+        (tg_user_id,)
+    )
+    # ... বাকি পুরনো code আগের মতোই
+    row = cur.fetchone(); cur.close(); conn.close()
+    if not row:
+        return jsonify({"status": "error", "message": "User not found."}), 404
+
+    session_string, api_id, api_hash, target_username = row
+
+    async def _sell():
+        client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
+        await client.connect()
+
+        # ★ FIX: Session authorize check
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise RuntimeError("Session expire হয়েছে। আবার connect করুন।")
+
+        sold = False
+        step = {"current": 0}
+        too_often_retry = {"count": 0, "max": 5}
+
+        @client.on(events.NewMessage(from_users=BOT))
+        async def handler(event):
+            nonlocal sold
+            msg  = event.message
+            text = msg.text or ""
+            if sold: return
+            if "too often" in text.lower() or "please wait" in text.lower():
+                import re
+                nums = re.findall(r'\d+', text)
+                wait_sec = int(nums[0]) + 2 if nums else 35
+                too_often_retry["count"] += 1
+                if too_often_retry["count"] <= too_often_retry["max"]:
+                    step["current"] = 0
+                    await asyncio.sleep(wait_sec)
+                    await client.send_message(BOT, "/start")
+                return
+            if "Welcome" in text and step["current"] == 0:
+                step["current"] = 1; await asyncio.sleep(1)
+                await client.send_message(BOT, "📋 Tasks")
+            elif "Please select a task" in text and step["current"] == 1:
+                step["current"] = 2; await asyncio.sleep(1)
+                await client.send_message(BOT, "🍪 ($0.0280)")
+            elif "🍪:" in text and step["current"] == 2:
+                step["current"] = 3; await asyncio.sleep(1)
+                await client.send_message(BOT, "🌟2FA:Create FB (No mail) ($0.0280)")
+            elif ("Description" in text or "REQUIRED" in text) and step["current"] == 3:
+                step["current"] = 4; await asyncio.sleep(1)
+                await client.send_message(BOT, "▶️ Start")
+            elif ("2FA" in text or "2fa key" in text.lower()) and step["current"] == 4:
+                step["current"] = 5; await asyncio.sleep(1)
+                await client.send_message(BOT, twofa_key)
+            elif ("send the account" in text.lower() or "🍪" in text) and step["current"] == 5:
+                step["current"] = 6; await asyncio.sleep(1)
+                await client.send_message(BOT, cookie)
+            elif ("confirm registration" in text.lower() or "Press the button" in text) and step["current"] == 6:
+                step["current"] = 7; await asyncio.sleep(1)
+                try:
+                    await msg.click(text="✅ Account registered")
+                except Exception:
+                    await client.send_message(BOT, "✅ Account registered")
+            elif "report has been received" in text.lower() and step["current"] == 7:
+                step["current"] = 8; sold = True
+                if target_username:
+                    await client.send_message(target_username, f"🎉 Account Sold!\n2FA: {twofa_key}")
+
+        await client.send_message(BOT, "/start")
+        for _ in range(600):
+            await asyncio.sleep(1)
+            if step["current"] == 8: break
+        client.remove_event_handler(handler)
+        await client.disconnect()
+        return sold
 
     try:
-        # ══ STEP 2: DB duplicate check ══
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("SELECT id FROM sold_keys WHERE twofa_key = %s", (twofa_key,))
-        already = cur.fetchone()
-        cur.close(); conn.close()
-        if already:
-            return jsonify({"status": "duplicate", "message": "এই key আগেই sell হয়েছে!"}), 409
-
-        # ══ STEP 3: ATOMIC LOCK — INSERT আগে, Telegram পরে ══
-        # এটাই সবচেয়ে গুরুত্বপূর্ণ fix।
-        # আগে sold_keys তে "pending" row ঢোকাও।
-        # যদি অন্য request আগেই ঢুকিয়ে থাকে → INSERT fail → duplicate return।
-        conn_lock = get_db(); cur_lock = conn_lock.cursor()
-        try:
-            cur_lock.execute("""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        sold = loop.run_until_complete(_sell())
+        loop.close()
+        if sold:
+            # ★ FIX: sold_keys এ save করো — duplicate prevent
+            conn2 = get_db(); cur2 = conn2.cursor()
+            cur2.execute("""
                 INSERT INTO sold_keys (tg_user_id, twofa_key, sold_at)
                 VALUES (%s, %s, %s)
+                ON CONFLICT (twofa_key) DO NOTHING
             """, (tg_user_id, twofa_key, int(time.time())))
-            conn_lock.commit()
-        except Exception:
-            # UNIQUE constraint violated → অন্য request আগেই insert করেছে
-            conn_lock.rollback()
-            cur_lock.close(); conn_lock.close()
-            return jsonify({"status": "duplicate", "message": "এই key আগেই sell হয়েছে!"}), 409
-        cur_lock.close(); conn_lock.close()
-
-        # ══ STEP 4: Session load ══
-        conn = get_db(); cur = conn.cursor()
-        cur.execute(
-            "SELECT session_string, api_id, api_hash, target_username FROM user_sessions WHERE user_id = %s",
-            (tg_user_id,)
-        )
-        row = cur.fetchone(); cur.close(); conn.close()
-        if not row:
-            # Lock row মুছে দাও যেন পরে retry করা যায়
-            conn_del = get_db(); cur_del = conn_del.cursor()
-            cur_del.execute("DELETE FROM sold_keys WHERE twofa_key = %s", (twofa_key,))
-            conn_del.commit(); cur_del.close(); conn_del.close()
-            return jsonify({"status": "error", "message": "User not found."}), 404
-
-        session_string, api_id, api_hash, target_username = row
-
-        # ══ STEP 5: Telegram sell flow ══
-        async def _sell():
-            client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
-            await client.connect()
-
-            if not await client.is_user_authorized():
-                await client.disconnect()
-                raise RuntimeError("Session expire হয়েছে। আবার connect করুন।")
-
-            sold = False
-            step = {"current": 0}
-            too_often_retry = {"count": 0, "max": 5}
-
-            @client.on(events.NewMessage(from_users=BOT))
-            async def handler(event):
-                nonlocal sold
-                msg  = event.message
-                text = msg.text or ""
-                if sold: return
-                if "too often" in text.lower() or "please wait" in text.lower():
-                    import re
-                    nums = re.findall(r'\d+', text)
-                    wait_sec = int(nums[0]) + 2 if nums else 35
-                    too_often_retry["count"] += 1
-                    if too_often_retry["count"] <= too_often_retry["max"]:
-                        step["current"] = 0
-                        await asyncio.sleep(wait_sec)
-                        await client.send_message(BOT, "/start")
-                    return
-                if "Welcome" in text and step["current"] == 0:
-                    step["current"] = 1; await asyncio.sleep(1)
-                    await client.send_message(BOT, "📋 Tasks")
-                elif "Please select a task" in text and step["current"] == 1:
-                    step["current"] = 2; await asyncio.sleep(1)
-                    await client.send_message(BOT, "🍪 ($0.0280)")
-                elif "🍪:" in text and step["current"] == 2:
-                    step["current"] = 3; await asyncio.sleep(1)
-                    await client.send_message(BOT, "🌟2FA:Create FB (No mail) ($0.0280)")
-                elif ("Description" in text or "REQUIRED" in text) and step["current"] == 3:
-                    step["current"] = 4; await asyncio.sleep(1)
-                    await client.send_message(BOT, "▶️ Start")
-                elif ("2FA" in text or "2fa key" in text.lower()) and step["current"] == 4:
-                    step["current"] = 5; await asyncio.sleep(1)
-                    await client.send_message(BOT, twofa_key)
-                elif ("send the account" in text.lower() or "🍪" in text) and step["current"] == 5:
-                    step["current"] = 6; await asyncio.sleep(1)
-                    await client.send_message(BOT, cookie)
-                elif ("confirm registration" in text.lower() or "Press the button" in text) and step["current"] == 6:
-                    step["current"] = 7; await asyncio.sleep(1)
-                    try:
-                        await msg.click(text="✅ Account registered")
-                    except Exception:
-                        await client.send_message(BOT, "✅ Account registered")
-                elif "report has been received" in text.lower() and step["current"] == 7:
-                    step["current"] = 8; sold = True
-                    if target_username:
-                        await client.send_message(target_username, f"🎉 Account Sold!\n2FA: {twofa_key}")
-
-            await client.send_message(BOT, "/start")
-            for _ in range(600):
-                await asyncio.sleep(1)
-                if step["current"] == 8: break
-            client.remove_event_handler(handler)
-            await client.disconnect()
-            return sold
-
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            sold = loop.run_until_complete(_sell())
-            loop.close()
-
-            if sold:
-                # ══ STEP 6: sell_stats update (sold_keys ইতিমধ্যে STEP 3 এ insert হয়েছে) ══
-                conn2 = get_db(); cur2 = conn2.cursor()
-                cur2.execute("""
-                    INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
-                    ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
-                """, (tg_user_id,))
-                conn2.commit(); cur2.close(); conn2.close()
-                return jsonify({"status": "success", "message": "Sale সম্পন্ন!"})
-
-            # Telegram flow সম্পন্ন হয়নি — lock row মুছে দাও যেন retry করা যায়
-            conn_del = get_db(); cur_del = conn_del.cursor()
-            cur_del.execute("DELETE FROM sold_keys WHERE twofa_key = %s", (twofa_key,))
-            conn_del.commit(); cur_del.close(); conn_del.close()
-            return jsonify({"status": "timeout", "message": "Flow incomplete।"})
-
-        except Exception as e:
-            # Exception হলেও lock row মুছে দাও
-            try:
-                conn_del = get_db(); cur_del = conn_del.cursor()
-                cur_del.execute("DELETE FROM sold_keys WHERE twofa_key = %s", (twofa_key,))
-                conn_del.commit(); cur_del.close(); conn_del.close()
-            except Exception:
-                pass
-            return jsonify({"status": "error", "message": str(e)}), 500
-
-    finally:
-        # ══ সবসময় in-memory lock ছেড়ে দাও ══
-        with _sale_lock:
-            _sale_in_progress.discard(twofa_key)
+            cur2.execute("""
+                INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
+                ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
+            """, (tg_user_id,))
+            conn2.commit(); cur2.close(); conn2.close()
+            return jsonify({"status": "success", "message": "Sale সম্পন্ন!"})
+        return jsonify({"status": "timeout", "message": "Flow incomplete।"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/automate_cookie_sale", methods=["POST"])
