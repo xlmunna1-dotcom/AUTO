@@ -31,7 +31,7 @@ BOT             = "@Taskl1_bot"
 COOKIE_SELL_BOT = "@QuickTaskPay1bot"
 
 # ── LICENSE BOT CONFIG ──
-LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN")
+LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN", "9285384211:AAF2tNUo5IpfTg9sEt2EJ8P9gTraXxcMOtI")
 ADMIN_IDS          = list(map(int, os.environ.get("ADMIN_IDS", "8301781046").split(",")))
 DEVELOPER_USERNAME = os.environ.get("DEVELOPER_USERNAME", "@NEXEX_99")
 APP_NAME           = os.environ.get("APP_NAME", "SuperToolsX")
@@ -1158,8 +1158,13 @@ def verify_otp():
 def automate_sale():
     data       = request.json
     tg_user_id = data["tg_user_id"]
-    twofa_key  = data["twofa_key"]
-    cookie     = data["cookie"]
+    twofa_key  = data.get("twofa_key", "").strip()
+    cookie     = data.get("cookie", "").strip()
+
+    if not twofa_key:
+        return jsonify({"status": "error", "message": "2FA key দরকার।"}), 400
+    if not cookie:
+        return jsonify({"status": "error", "message": "Cookie দরকার।"}), 400
 
     conn = get_db(); cur = conn.cursor()
     cur.execute(
@@ -1173,20 +1178,46 @@ def automate_sale():
     session_string, api_id, api_hash, target_username = row
 
     async def _sell():
+        import re as _re
         client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
         await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise RuntimeError("Session expire হয়েছে।")
+
         sold = False
         step = {"current": 0}
         too_often_retry = {"count": 0, "max": 5}
 
+        async def try_click_or_send(msg, btn_labels, fallback_text):
+            """বাটন ক্লিক করার চেষ্টা করে, না পেলে text পাঠায়"""
+            wanted = [l.lower() for l in btn_labels]
+            for button_row in (msg.buttons or []):
+                for button in button_row:
+                    bt = (getattr(button, "text", "") or "").strip()
+                    if any(w in bt.lower() for w in wanted):
+                        try:
+                            await msg.click(text=bt)
+                            return True
+                        except Exception:
+                            pass
+            if fallback_text:
+                await client.send_message(BOT, fallback_text)
+                return True
+            return False
+
         @client.on(events.NewMessage(from_users=BOT))
         async def handler(event):
             nonlocal sold
+            if sold:
+                return
             msg  = event.message
             text = msg.text or ""
-            if "too often" in text.lower() or "please wait" in text.lower():
-                import re
-                nums = re.findall(r'\d+', text)
+            low  = text.lower()
+
+            # Rate limit হ্যান্ডেল
+            if "too often" in low or ("please wait" in low and "report" not in low):
+                nums = _re.findall(r'\d+', text)
                 wait_sec = int(nums[0]) + 2 if nums else 35
                 too_often_retry["count"] += 1
                 if too_often_retry["count"] <= too_often_retry["max"]:
@@ -1194,46 +1225,100 @@ def automate_sale():
                     await asyncio.sleep(wait_sec)
                     await client.send_message(BOT, "/start")
                 return
-            if "Welcome" in text and step["current"] == 0:
-                step["current"] = 1; await asyncio.sleep(1)
-                await client.send_message(BOT, "📋 Tasks")
-            elif "Please select a task" in text and step["current"] == 1:
-                step["current"] = 2; await asyncio.sleep(1)
-                await client.send_message(BOT, "🍪 ($0.0280)")
-            elif "🍪:" in text and step["current"] == 2:
-                step["current"] = 3; await asyncio.sleep(1)
-                await client.send_message(BOT, "🌟2FA:Create FB (No mail) ($0.0280)")
-            elif ("Description" in text or "REQUIRED" in text) and step["current"] == 3:
-                step["current"] = 4; await asyncio.sleep(1)
-                await client.send_message(BOT, "▶️ Start")
-            elif ("2FA" in text or "2fa key" in text.lower()) and step["current"] == 4:
-                step["current"] = 5; await asyncio.sleep(1)
+
+            # STEP 0 → 1: Welcome message
+            if step["current"] == 0 and "welcome" in low:
+                step["current"] = 1
+                await asyncio.sleep(1)
+                await try_click_or_send(msg, ["tasks", "task"], "📋 Tasks")
+
+            # STEP 1 → 2: Task selection menu
+            elif step["current"] == 1 and "please select a task" in low:
+                step["current"] = 2
+                await asyncio.sleep(1)
+                await try_click_or_send(msg, ["🍪", "cookie"], "🍪 ($0.0280)")
+
+            # STEP 2 → 3: Cookie task list দেখালে 2FA task বেছে নাও
+            elif step["current"] == 2 and "🍪" in text:
+                step["current"] = 3
+                await asyncio.sleep(1)
+                await try_click_or_send(
+                    msg,
+                    ["2fa", "create fb", "no mail"],
+                    "🌟2FA:Create FB (No mail) ($0.0280)"
+                )
+
+            # STEP 3 → 4: Task description দেখালে Start দাও
+            elif step["current"] == 3 and ("description" in low or "required" in low or "review time" in low):
+                step["current"] = 4
+                await asyncio.sleep(1)
+                await try_click_or_send(msg, ["start", "▶️"], "▶️ Start")
+
+            # STEP 4 → 5: 2FA key চাইলে key পাঠাও
+            elif step["current"] == 4 and ("2fa key" in low or "enter your 2fa" in low or "2fa" in low):
+                step["current"] = 5
+                await asyncio.sleep(1)
                 await client.send_message(BOT, twofa_key)
-            elif ("send the account" in text.lower() or "🍪" in text) and step["current"] == 5:
-                step["current"] = 6; await asyncio.sleep(1)
+
+            # STEP 5 → 6: OTP/code দেখালে এবং cookie চাইলে cookie পাঠাও
+            elif step["current"] == 5 and (
+                "send the account" in low or
+                "please send" in low or
+                "one-time code" in low or
+                "tap the code" in low or
+                ("🍪" in text and "send" in low)
+            ):
+                step["current"] = 6
+                await asyncio.sleep(1.5)
                 await client.send_message(BOT, cookie)
-            elif ("confirm registration" in text.lower() or "Press the button" in text) and step["current"] == 6:
-                step["current"] = 7; await asyncio.sleep(1)
-                try:
-                    await msg.click(text="✅ Account registered")
-                except Exception:
-                    await client.send_message(BOT, "✅ Account registered")
-            elif "report has been received" in text.lower() and step["current"] == 7:
-                step["current"] = 8; sold = True
-                await client.send_message(target_username, f"🎉 Account Sold!\n2FA: {twofa_key}")
+
+            # STEP 6 → 7: Confirm registration button আসলে click করো
+            elif step["current"] == 6 and (
+                "confirm registration" in low or
+                "press the button" in low or
+                "cancel the task" in low
+            ):
+                step["current"] = 7
+                await asyncio.sleep(1)
+                await try_click_or_send(
+                    msg,
+                    ["account registered", "✅ account", "registered"],
+                    "✅ Account registered"
+                )
+
+            # STEP 7 → 8: সফলভাবে জমা হলে
+            elif step["current"] >= 6 and (
+                "report has been received" in low or
+                "your report has been received" in low or
+                "task submitted successfully" in low or
+                "submitted successfully" in low or
+                "received! please wait" in low or
+                "received" in low and "wait" in low
+            ):
+                step["current"] = 8
+                sold = True
+                if target_username:
+                    try:
+                        await client.send_message(
+                            target_username,
+                            f"🎉 Account Sold!\n2FA Key: {twofa_key}"
+                        )
+                    except Exception:
+                        pass
 
         await client.send_message(BOT, "/start")
         for _ in range(600):
             await asyncio.sleep(1)
-            if step["current"] == 8: break
+            if step["current"] == 8:
+                break
         client.remove_event_handler(handler)
         await client.disconnect()
-        return sold
+        return sold, step["current"]
 
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        sold = loop.run_until_complete(_sell())
+        sold, last_step = loop.run_until_complete(_sell())
         loop.close()
         if sold:
             conn2 = get_db(); cur2 = conn2.cursor()
@@ -1242,8 +1327,8 @@ def automate_sale():
                 ON CONFLICT (user_id) DO UPDATE SET sell_count = sell_stats.sell_count + 1
             """, (tg_user_id,))
             conn2.commit(); cur2.close(); conn2.close()
-            return jsonify({"status": "success", "message": "Sale সম্পন্ন!"})
-        return jsonify({"status": "timeout", "message": "Flow incomplete।"})
+            return jsonify({"status": "success", "message": "Sale সম্পন্ন! ✅"})
+        return jsonify({"status": "timeout", "message": f"Flow incomplete। Step: {last_step}/8"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -1297,13 +1382,15 @@ def automate_cookie_sale():
 
         async def handler(event):
             nonlocal sold
+            if sold: return
             msg  = event.message
             text = msg.text or ""
             low  = text.lower()
-            if sold: return
-            if "too often" in low or "please wait" in low:
-                import re
-                nums = re.findall(r'\d+', text)
+
+            # Rate limit হ্যান্ডেল
+            if "too often" in low or ("please wait" in low and "report" not in low):
+                import re as _re2
+                nums = _re2.findall(r'\d+', text)
                 wait_sec = int(nums[0]) + 2 if nums else 35
                 too_often_retry["count"] += 1
                 if too_often_retry["count"] <= too_often_retry["max"]:
@@ -1311,34 +1398,45 @@ def automate_cookie_sale():
                     await asyncio.sleep(wait_sec)
                     await client.send_message(COOKIE_SELL_BOT, "/start")
                 return
-            if step["current"] == 0 and ("welcome" in low or "gotask pay" in low):
-                step["current"] = 1; await asyncio.sleep(0.6)
-                await click_or_send(msg, ["task"], "Task")
-            elif step["current"] == 1 and ("which platform" in low or "platform" in low):
-                step["current"] = 2; await asyncio.sleep(0.6)
+
+            if step["current"] == 0 and ("welcome" in low or "gotask pay" in low or "this bot helps" in low):
+                step["current"] = 1; await asyncio.sleep(0.8)
+                await click_or_send(msg, ["task", "tasks"], "📋 Tasks")
+            elif step["current"] == 1 and ("which platform" in low or "platform" in low or "select" in low):
+                step["current"] = 2; await asyncio.sleep(0.8)
                 await click_or_send(msg, ["facebook"], "Facebook")
-            elif step["current"] == 2 and ("fb cookies" in low or "facebook" in low):
-                step["current"] = 3; await asyncio.sleep(0.6)
-                await click_or_send(msg, ["fb cookies"], "Fb Cookies (4 BDT)")
-            elif step["current"] == 3 and "submit uid" in low:
-                step["current"] = 4; await asyncio.sleep(0.6)
-                await click_or_send(msg, ["submit uid"], "Submit UID 🆔")
-            elif step["current"] == 4 and ("send me the uid" in low or "send uid" in low):
-                step["current"] = 5; await asyncio.sleep(0.6)
+            elif step["current"] == 2 and ("fb cookies" in low or "facebook" in low or "cookie" in low):
+                step["current"] = 3; await asyncio.sleep(0.8)
+                await click_or_send(msg, ["fb cookies", "cookie"], "Fb Cookies (4 BDT)")
+            elif step["current"] == 3 and ("submit uid" in low or "uid" in low):
+                step["current"] = 4; await asyncio.sleep(0.8)
+                await click_or_send(msg, ["submit uid", "uid"], "Submit UID 🆔")
+            elif step["current"] == 4 and ("send me the uid" in low or "send uid" in low or "send your uid" in low):
+                step["current"] = 5; await asyncio.sleep(0.8)
                 await client.send_message(COOKIE_SELL_BOT, uid)
-            elif step["current"] == 5 and "uid received" in low:
-                step["current"] = 6; await asyncio.sleep(0.6)
+            elif step["current"] == 5 and ("uid received" in low or "uid" in low and "received" in low):
+                step["current"] = 6; await asyncio.sleep(0.8)
                 await client.send_message(COOKIE_SELL_BOT, cookie)
-            elif step["current"] == 6 and "cookies received" in low:
-                step["current"] = 7; await asyncio.sleep(0.6)
-                await click_or_send(msg, ["complete and submit"], "Complete and Submit")
-            elif step["current"] >= 6 and ("task submitted successfully" in low or "submitted successfully" in low):
+            elif step["current"] == 6 and ("cookies received" in low or "cookie received" in low or "received" in low):
+                step["current"] = 7; await asyncio.sleep(0.8)
+                await click_or_send(msg, ["complete and submit", "complete", "submit"], "Complete and Submit")
+            elif step["current"] >= 6 and (
+                "task submitted successfully" in low or
+                "submitted successfully" in low or
+                "report has been received" in low or
+                "your report has been received" in low or
+                "received! please wait" in low or
+                ("received" in low and "wait" in low)
+            ):
                 step["current"] = 8; sold = True
                 if target_username:
-                    await client.send_message(
-                        target_username,
-                        f"🎉 Cookie Task Submitted!\nUID: {uid}\nBot: {COOKIE_SELL_BOT}"
-                    )
+                    try:
+                        await client.send_message(
+                            target_username,
+                            f"🎉 Cookie Task Submitted!\nUID: {uid}\nBot: {COOKIE_SELL_BOT}"
+                        )
+                    except Exception:
+                        pass
 
         client.add_event_handler(handler, events.NewMessage(from_users=COOKIE_SELL_BOT))
         client.add_event_handler(handler, events.MessageEdited(from_users=COOKIE_SELL_BOT))
