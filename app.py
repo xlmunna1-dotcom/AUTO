@@ -115,6 +115,30 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 
+# ══════════════════════════════════════════════════════════
+#  AUTO SELL HELPER
+# ══════════════════════════════════════════════════════════
+
+def is_task_off_message(text):
+    """Bot থেকে আসা 'task off' বা 'conversation reset' message detect করে।"""
+    if not text:
+        return False
+    low = text.lower()
+    patterns = [
+        "conversation was reset",
+        "please start again",
+        "start again from the main menu",
+        "previous conversation",
+        "session expired",
+        "task is off", "tasks are off",
+        "task not available", "no task available",
+        "temporarily unavailable",
+        "try again later",
+        "under maintenance",
+    ]
+    return any(p in low for p in patterns)
+
+
 def ensure_tables():
     conn = get_db()
     cur  = conn.cursor()
@@ -1215,6 +1239,12 @@ def automate_sale():
             text = msg.text or ""
             low  = text.lower()
 
+            # ⭐ Task off detect
+            if is_task_off_message(text):
+                step["current"] = -1
+                print(f"[AUTOMATE_SALE] Task off: {text[:80]}", flush=True)
+                return
+
             # Rate limit হ্যান্ডেল
             if "too often" in low or ("please wait" in low and "report" not in low):
                 nums = _re.findall(r'\d+', text)
@@ -1311,6 +1341,8 @@ def automate_sale():
             await asyncio.sleep(1)
             if step["current"] == 8:
                 break
+            if step["current"] == -1:  # ⭐ task_off
+                break
         client.remove_event_handler(handler)
         await client.disconnect()
         return sold, step["current"]
@@ -1328,225 +1360,292 @@ def automate_sale():
             """, (tg_user_id,))
             conn2.commit(); cur2.close(); conn2.close()
             return jsonify({"status": "success", "message": "Sale সম্পন্ন! ✅"})
+        if last_step == -1:  # ⭐ task_off
+            return jsonify({"status": "task_off", "retry_after_seconds": 300})
         return jsonify({"status": "timeout", "message": f"Flow incomplete। Step: {last_step}/8"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/bulk_sell", methods=["POST"])
-def bulk_sell():
-    import re as _re
+# ══════════════════════════════════════════════════════════
+#  AUTO SELL — /auto_sell  (সম্পূর্ণ আলাদা endpoint)
+#  /automate_sale এর সাথে কোনো সম্পর্ক নেই।
+# ══════════════════════════════════════════════════════════
 
-    data        = request.get_json(silent=True) or {}
-    tg_user_id  = str(data.get("tg_user_id", "")).strip()
-    accounts    = data.get("accounts", [])
-    gap_seconds = int(data.get("gap_seconds", 30))
+@app.route("/auto_sell", methods=["POST"])
+def auto_sell_endpoint():
+    """
+    AUTO SELL Panel এর জন্য আলাদা endpoint।
+    /automate_sale এর মতোই bot এ sell করে, কিন্তু:
+    - task_off detect করে আলাদা response দেয়
+    - rate_limit এ wait_seconds দেয়
+    - session_expired detect করে
+    - সম্পূর্ণ স্বাধীন ফাংশন
+    """
+    data = request.json or {}
+    tg_user_id = data.get("tg_user_id", "").strip()
+    twofa_key  = data.get("twofa_key", "").strip()
+    cookie     = data.get("cookie", "").strip()
 
     if not tg_user_id:
-        return jsonify({"status": "error", "message": "tg_user_id দরকার।"}), 400
-    if not accounts or not isinstance(accounts, list):
-        return jsonify({"status": "error", "message": "accounts list দরকার।"}), 400
+        return jsonify({"status": "error", "message": "tg_user_id প্রয়োজন"}), 400
+    if not twofa_key:
+        return jsonify({"status": "error", "message": "2FA key প্রয়োজন"}), 400
+    if not cookie or "c_user=" not in cookie:
+        return jsonify({"status": "error", "message": "Cookie invalid"}), 400
 
+    # ── Session DB থেকে নাও ──
     conn = get_db(); cur = conn.cursor()
     cur.execute(
-        "SELECT session_string, api_id, api_hash FROM user_sessions WHERE user_id = %s",
+        "SELECT session_string, api_id, api_hash, target_username "
+        "FROM user_sessions WHERE user_id = %s",
         (tg_user_id,)
     )
     row = cur.fetchone(); cur.close(); conn.close()
+
     if not row:
-        return jsonify({"status": "error", "message": "User session পাওয়া যায়নি।"}), 404
+        return jsonify({
+            "status": "session_expired",
+            "message": "User session নেই — আগে Connect করুন"
+        }), 404
 
-    session_string, api_id, api_hash = row
+    session_string, api_id, api_hash, target_username = row
 
-    async def _sell_one(cookie: str, twofa_key: str) -> str:
+    # ── Sell flow (Telethon দিয়ে) ──
+    async def _auto_sell():
+        import re as _re
         client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
         await client.connect()
+
         if not await client.is_user_authorized():
             await client.disconnect()
-            return "session_expired"
+            return "session_expired", "Session expire হয়েছে", 0
 
-        result    = {"value": None}
-        step      = {"current": 0}
-        too_often = {"count": 0}
+        sold = False
+        task_off = False
+        rate_limit_secs = 0
+        step = {"current": 0}
+        too_often_retry = {"count": 0, "max": 3}
 
-        async def try_click(msg, labels, fallback=None):
-            wanted = [l.lower() for l in labels]
-            for row_ in (msg.buttons or []):
-                for btn_ in row_:
-                    bt = (getattr(btn_, "text", "") or "").strip()
+        async def try_click_or_send(msg, btn_labels, fallback_text):
+            wanted = [l.lower() for l in btn_labels]
+            for button_row in (msg.buttons or []):
+                for button in button_row:
+                    bt = (getattr(button, "text", "") or "").strip()
                     if any(w in bt.lower() for w in wanted):
                         try:
                             await msg.click(text=bt)
                             return True
                         except Exception:
                             pass
-            if fallback:
-                await client.send_message(BOT, fallback)
+            if fallback_text:
+                await client.send_message(BOT, fallback_text)
                 return True
             return False
 
         @client.on(events.NewMessage(from_users=BOT))
         async def handler(event):
-            if result["value"] is not None:
+            nonlocal sold, task_off, rate_limit_secs
+            if sold or task_off:
                 return
             msg  = event.message
             text = msg.text or ""
             low  = text.lower()
 
-            # CASE 1: too often
+            # ⭐ Task off detect
+            if is_task_off_message(text):
+                task_off = True
+                print(f"[AUTO_SELL] Task off: {text[:80]}", flush=True)
+                return
+
+            # Rate limit detect
             if "too often" in low or ("please wait" in low and "report" not in low):
-                nums     = _re.findall(r'\d+', text)
-                wait_sec = int(nums[0]) + 2 if nums else 35
-                too_often["count"] += 1
-                if too_often["count"] > 5:
-                    result["value"] = "too_often_skip"
-                    return
-                step["current"] = 0
-                await asyncio.sleep(wait_sec)
-                await client.send_message(BOT, "/start")
+                nums = _re.findall(r'\d+', text)
+                wait_s = int(nums[0]) + 2 if nums else 35
+                too_often_retry["count"] += 1
+                if too_often_retry["count"] <= too_often_retry["max"]:
+                    step["current"] = 0
+                    await asyncio.sleep(wait_s)
+                    rate_limit_secs = wait_s
+                    await client.send_message(BOT, "/start")
+                else:
+                    rate_limit_secs = wait_s
                 return
 
-            # CASE 2: reset error (Step 2 এ 🍪 click এর পর)
-            if step["current"] == 2 and (
-                "our previous conversation was reset" in low or
-                "conversation was reset" in low or
-                "previous conversation" in low
-            ):
-                await asyncio.sleep(300)
-                step["current"] = 0
-                await client.send_message(BOT, "/start")
-                return
-
-            # STEP 0 → 1
+            # STEP 0 → 1: Welcome
             if step["current"] == 0 and "welcome" in low:
                 step["current"] = 1
                 await asyncio.sleep(1)
-                await try_click(msg, ["tasks", "task"], "📋 Tasks")
+                await try_click_or_send(msg, ["tasks", "task"], "📋 Tasks")
 
-            # STEP 1 → 2
+            # STEP 1 → 2: Task menu
             elif step["current"] == 1 and "please select a task" in low:
                 step["current"] = 2
                 await asyncio.sleep(1)
-                await try_click(msg, ["🍪", "cookie", "0.0280"], "🍪 ($0.0280)")
+                await try_click_or_send(msg, ["🍪", "cookie"], "🍪 ($0.0280)")
 
-            # STEP 2 → 3
+            # STEP 2 → 3: Cookie list → 2FA task
             elif step["current"] == 2 and "🍪" in text:
                 step["current"] = 3
                 await asyncio.sleep(1)
-                await try_click(msg, ["2fa", "create fb", "no mail"],
-                                "🌟2FA:Create FB (No mail) ($0.0280)")
+                await try_click_or_send(
+                    msg,
+                    ["2fa", "create fb", "no mail"],
+                    "🌟2FA:Create FB (No mail) ($0.0280)"
+                )
 
-            # STEP 3 → 4
+            # STEP 3 → 4: Task description → Start
             elif step["current"] == 3 and (
                 "description" in low or "required" in low or "review time" in low
             ):
                 step["current"] = 4
                 await asyncio.sleep(1)
-                await try_click(msg, ["start", "▶", "▶️"], "▶️ Start")
+                await try_click_or_send(msg, ["start", "▶️"], "▶️ Start")
 
-            # STEP 4 → 5
+            # STEP 4 → 5: 2FA key চাওয়া
             elif step["current"] == 4 and (
-                "2fa key" in low or "enter your 2fa" in low or
-                ("2fa" in low and ("enter" in low or "send" in low or "provide" in low))
+                "2fa key" in low or "enter your 2fa" in low or "2fa" in low
             ):
                 step["current"] = 5
                 await asyncio.sleep(1)
                 await client.send_message(BOT, twofa_key)
 
-            # STEP 5 → 6
+            # STEP 5 → 6: Cookie চাওয়া
             elif step["current"] == 5 and (
-                "send the account" in low or "please send" in low or
-                "one-time code" in low or "tap the code" in low or
-                ("🍪" in text and "send" in low)
+                "send the account" in low
+                or "please send" in low
+                or "one-time code" in low
+                or ("🍪" in text and "send" in low)
             ):
                 step["current"] = 6
                 await asyncio.sleep(1.5)
                 await client.send_message(BOT, cookie)
 
-            # STEP 6 → 7
+            # STEP 6 → 7: Confirm registration
             elif step["current"] == 6 and (
-                "confirm registration" in low or
-                "press the button" in low or
-                "cancel the task" in low
+                "confirm registration" in low
+                or "press the button" in low
             ):
                 step["current"] = 7
                 await asyncio.sleep(1)
-                await try_click(msg, ["account registered", "✅ account", "registered"],
-                                "✅ Account registered")
+                await try_click_or_send(
+                    msg,
+                    ["account registered", "✅ account", "registered"],
+                    "✅ Account registered"
+                )
 
-            # STEP 7 → 8
+            # STEP 7 → 8: Success
             elif step["current"] >= 6 and (
-                "report has been received" in low or
-                "your report has been received" in low or
-                "task submitted successfully" in low or
-                "submitted successfully" in low or
-                "received! please wait" in low or
-                ("received" in low and "wait" in low)
+                "report has been received" in low
+                or "task submitted successfully" in low
+                or "submitted successfully" in low
+                or ("received" in low and "wait" in low)
             ):
                 step["current"] = 8
-                result["value"] = "success"
+                sold = True
 
         await client.send_message(BOT, "/start")
-        for _ in range(600):
+        for _ in range(300):  # 5 min max
             await asyncio.sleep(1)
-            if result["value"] is not None:
+            if step["current"] == 8:
+                break
+            if task_off:
+                break
+            if rate_limit_secs > 0 and too_often_retry["count"] > too_often_retry["max"]:
                 break
 
         client.remove_event_handler(handler)
         await client.disconnect()
-        return result["value"] if result["value"] is not None else "timeout"
 
-    results     = []
-    success_cnt = 0
-    failed_cnt  = 0
+        if sold:
+            return "success", "Sale সম্পন্ন", 0
+        if task_off:
+            return "task_off", "Conversation reset — task নেই", 300
+        if rate_limit_secs > 0:
+            return "rate_limit", "Rate limited", rate_limit_secs
+        return "timeout", f"Step: {step['current']}/8", 0
 
-    for idx, acct in enumerate(accounts):
-        cookie    = str(acct.get("cookie", "")).strip()
-        twofa_key = str(acct.get("twofa_key", "")).strip()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result_status, result_msg, wait_secs = loop.run_until_complete(_auto_sell())
+        loop.close()
 
-        if not cookie or not twofa_key:
-            status = "skipped_invalid_input"
-            failed_cnt += 1
-        else:
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                status = loop.run_until_complete(_sell_one(cookie, twofa_key))
-                loop.close()
-            except Exception as e:
-                status = "error_" + str(e)[:60]
+        if result_status == "success":
+            # Stats update
+            conn2 = get_db(); cur2 = conn2.cursor()
+            cur2.execute("""
+                INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    sell_count = sell_stats.sell_count + 1
+            """, (tg_user_id,))
+            conn2.commit(); cur2.close(); conn2.close()
 
-            if status == "success":
+            if target_username:
                 try:
-                    conn2 = get_db(); cur2 = conn2.cursor()
-                    cur2.execute("""
-                        INSERT INTO sell_stats (user_id, sell_count) VALUES (%s, 1)
-                        ON CONFLICT (user_id) DO UPDATE
-                            SET sell_count = sell_stats.sell_count + 1
-                    """, (tg_user_id,))
-                    conn2.commit(); cur2.close(); conn2.close()
+                    loop2 = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop2)
+                    loop2.run_until_complete(_notify_sold(target_username, twofa_key))
+                    loop2.close()
                 except Exception:
                     pass
-                success_cnt += 1
-            else:
-                failed_cnt += 1
 
-        results.append({
-            "cookie"   : cookie[:30] + "..." if len(cookie) > 30 else cookie,
-            "twofa_key": twofa_key,
-            "status"   : status,
+            return jsonify({
+                "status": "success",
+                "message": "✅ Sale সম্পন্ন!"
+            })
+
+        if result_status == "task_off":
+            return jsonify({
+                "status": "task_off",
+                "message": result_msg,
+                "retry_after_seconds": wait_secs
+            })
+
+        if result_status == "rate_limit":
+            return jsonify({
+                "status": "rate_limit",
+                "message": result_msg,
+                "wait_seconds": wait_secs
+            })
+
+        if result_status == "session_expired":
+            return jsonify({
+                "status": "session_expired",
+                "message": result_msg
+            })
+
+        return jsonify({
+            "status": "timeout",
+            "message": result_msg
         })
 
-        if idx < len(accounts) - 1:
-            import time as _time
-            _time.sleep(gap_seconds)
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
-    return jsonify({
-        "total"  : len(accounts),
-        "success": success_cnt,
-        "failed" : failed_cnt,
-        "results": results,
-    })
+
+async def _notify_sold(target_username, twofa_key):
+    """AUTO SELL সফল হলে target user কে Telegram এ notify করো।"""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute(
+            "SELECT session_string, api_id, api_hash FROM user_sessions WHERE user_id = %s",
+            (target_username,)
+        )
+        row = cur.fetchone(); cur.close(); conn.close()
+        if row:
+            client = TelegramClient(StringSession(row[0]), int(row[1]), row[2])
+            await client.connect()
+            await client.send_message(
+                target_username,
+                f"🎉 AUTO SELL সফল!\n2FA Key: {twofa_key}"
+            )
+            await client.disconnect()
+    except Exception:
+        pass
 
 
 @app.route("/automate_cookie_sale", methods=["POST"])
