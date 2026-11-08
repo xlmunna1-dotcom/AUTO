@@ -1,5 +1,6 @@
 flask
 gunicorn
 telethon
+requests
 psycopg2-binary
 python-telegram-bot>=22.7
