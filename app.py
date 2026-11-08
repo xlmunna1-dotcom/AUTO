@@ -315,6 +315,41 @@ def ensure_tables():
             last_reset   BIGINT DEFAULT 0
         )
     """)
+    # ── SCHEDULED SELL QUEUE ──
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sell_queue (
+            id           SERIAL PRIMARY KEY,
+            tg_user_id   TEXT NOT NULL,
+            twofa_key    TEXT NOT NULL,
+            cookie       TEXT NOT NULL,
+            status       TEXT DEFAULT 'pending',
+            added_at     BIGINT NOT NULL,
+            sold_at      BIGINT DEFAULT NULL,
+            retry_count  INTEGER DEFAULT 0
+        )
+    """)
+    # ── SELL SCHEDULE CONFIG ──
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sell_schedule (
+            tg_user_id        TEXT PRIMARY KEY,
+            start_time_epoch  BIGINT NOT NULL,
+            task_off_wait_sec INTEGER DEFAULT 300,
+            gap_seconds       INTEGER DEFAULT 30,
+            enabled           BOOLEAN DEFAULT TRUE,
+            created_at        BIGINT NOT NULL
+        )
+    """)
+    # ── SELL LOG (App এ দেখানোর জন্য) ──
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sell_log (
+            id           SERIAL PRIMARY KEY,
+            tg_user_id   TEXT NOT NULL,
+            message      TEXT NOT NULL,
+            log_time     BIGINT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sell_log_user ON sell_log(tg_user_id, log_time DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sell_queue_user ON sell_queue(tg_user_id, status)")
     conn.commit()
     cur.close()
     conn.close()
@@ -2055,6 +2090,370 @@ def ping():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "running", "message": "Auto Server is running!"}), 200
+
+
+# ══════════════════════════════════════════════════════════
+#  SCHEDULED SELL — ENDPOINTS + BACKGROUND WORKER
+# ══════════════════════════════════════════════════════════
+
+def sell_log_add(tg_user_id: str, message: str):
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO sell_log (tg_user_id, message, log_time) VALUES (%s, %s, %s)",
+            (tg_user_id, message, int(time.time()))
+        )
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[SELL_LOG] DB error: {e}", flush=True)
+
+
+@app.route("/upload_holds", methods=["POST"])
+def upload_holds():
+    """Android থেকে hold accounts upload → Server Queue তে add।"""
+    data       = request.get_json(silent=True) or {}
+    tg_user_id = str(data.get("tg_user_id", "")).strip()
+    accounts   = data.get("accounts", [])
+    if not tg_user_id:
+        return jsonify({"status": "error", "message": "tg_user_id দরকার"}), 400
+    if not accounts or not isinstance(accounts, list):
+        return jsonify({"status": "error", "message": "accounts list দরকার"}), 400
+    now = int(time.time())
+    added = 0
+    conn = get_db(); cur = conn.cursor()
+    for acc in accounts:
+        key    = str(acc.get("twofa_key", "")).strip()
+        cookie = str(acc.get("cookie", "")).strip()
+        if not key or not cookie or "c_user=" not in cookie:
+            continue
+        cur.execute(
+            "INSERT INTO sell_queue (tg_user_id, twofa_key, cookie, status, added_at) VALUES (%s,%s,%s,'pending',%s)",
+            (tg_user_id, key, cookie, now)
+        )
+        added += 1
+    conn.commit(); cur.close(); conn.close()
+    sell_log_add(tg_user_id, f"📥 Queue +{added} accounts added")
+    return jsonify({"status": "success", "added": added})
+
+
+@app.route("/set_schedule", methods=["POST"])
+def set_schedule():
+    """Schedule set — কখন sell শুরু হবে।"""
+    data              = request.get_json(silent=True) or {}
+    tg_user_id        = str(data.get("tg_user_id", "")).strip()
+    start_time_epoch  = int(data.get("start_time_epoch", 0))
+    task_off_wait_sec = int(data.get("task_off_wait_sec", 300))
+    gap_seconds       = int(data.get("gap_seconds", 30))
+    if not tg_user_id or start_time_epoch <= 0:
+        return jsonify({"status": "error", "message": "tg_user_id ও start_time_epoch দরকার"}), 400
+    now = int(time.time())
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sell_schedule (tg_user_id, start_time_epoch, task_off_wait_sec, gap_seconds, enabled, created_at)
+        VALUES (%s,%s,%s,%s,TRUE,%s)
+        ON CONFLICT (tg_user_id) DO UPDATE SET
+            start_time_epoch=EXCLUDED.start_time_epoch,
+            task_off_wait_sec=EXCLUDED.task_off_wait_sec,
+            gap_seconds=EXCLUDED.gap_seconds,
+            enabled=TRUE, created_at=EXCLUDED.created_at
+    """, (tg_user_id, start_time_epoch, task_off_wait_sec, gap_seconds, now))
+    conn.commit(); cur.close(); conn.close()
+    import datetime as _dt
+    fmt = _dt.datetime.fromtimestamp(start_time_epoch).strftime("%H:%M %d/%m/%Y")
+    sell_log_add(tg_user_id, f"⏰ Schedule set → Start: {fmt} | Gap: {gap_seconds}s | TaskOff: {task_off_wait_sec}s")
+    return jsonify({"status": "success", "message": f"Schedule saved! Start: {fmt}"})
+
+
+@app.route("/get_sell_log", methods=["POST"])
+def get_sell_log():
+    """Android app এ LOG দেখানোর জন্য।"""
+    data       = request.get_json(silent=True) or {}
+    tg_user_id = str(data.get("tg_user_id", "")).strip()
+    after_id   = int(data.get("after_id", 0))
+    if not tg_user_id:
+        return jsonify({"status": "error"}), 400
+    conn = get_db(); cur = conn.cursor()
+    cur.execute(
+        "SELECT id, message, log_time FROM sell_log WHERE tg_user_id=%s AND id>%s ORDER BY id ASC LIMIT 100",
+        (tg_user_id, after_id)
+    )
+    rows = cur.fetchall()
+    cur.execute("SELECT status, COUNT(*) FROM sell_queue WHERE tg_user_id=%s GROUP BY status", (tg_user_id,))
+    stats = {r[0]: r[1] for r in cur.fetchall()}
+    cur.close(); conn.close()
+    return jsonify({
+        "status": "success",
+        "logs"  : [{"id": r[0], "message": r[1], "time": r[2]} for r in rows],
+        "stats" : {"pending": stats.get("pending",0), "selling": stats.get("selling",0),
+                   "sold": stats.get("sold",0), "failed": stats.get("failed",0)}
+    })
+
+
+@app.route("/get_queue_stats", methods=["POST"])
+def get_queue_stats():
+    data       = request.get_json(silent=True) or {}
+    tg_user_id = str(data.get("tg_user_id", "")).strip()
+    if not tg_user_id:
+        return jsonify({"status": "error"}), 400
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT status, COUNT(*) FROM sell_queue WHERE tg_user_id=%s GROUP BY status", (tg_user_id,))
+    stats = {r[0]: r[1] for r in cur.fetchall()}
+    cur.execute("SELECT start_time_epoch, enabled, gap_seconds, task_off_wait_sec FROM sell_schedule WHERE tg_user_id=%s", (tg_user_id,))
+    sched = cur.fetchone()
+    cur.close(); conn.close()
+    import datetime as _dt
+    sched_info = {}
+    if sched:
+        sched_info = {
+            "start_time"    : _dt.datetime.fromtimestamp(sched[0]).strftime("%H:%M %d/%m"),
+            "enabled"       : sched[1],
+            "gap"           : sched[2],
+            "task_off_wait" : sched[3],
+        }
+    return jsonify({
+        "status"  : "success",
+        "stats"   : {"pending": stats.get("pending",0), "selling": stats.get("selling",0),
+                     "sold": stats.get("sold",0), "failed": stats.get("failed",0)},
+        "schedule": sched_info
+    })
+
+
+# ── Scheduled Sell Worker ──
+_scheduler_running = {}
+
+def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: int):
+    """
+    একজন user এর পুরো queue শেষ করে।
+    Task off → task_off_wait সেকেন্ড wait → আবার চেষ্টা (কোনো limit নেই)।
+    নতুন account add হলেও সেগুলোও বিক্রি হবে।
+    """
+    _scheduler_running[tg_user_id] = True
+    sell_log_add(tg_user_id, "🟢 Server sell শুরু হয়েছে!")
+
+    while True:
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute(
+                "SELECT id, twofa_key, cookie FROM sell_queue WHERE tg_user_id=%s AND status='pending' ORDER BY id ASC LIMIT 1",
+                (tg_user_id,)
+            )
+            row = cur.fetchone(); cur.close(); conn.close()
+        except Exception as e:
+            sell_log_add(tg_user_id, f"❌ DB error: {e}"); time.sleep(10); continue
+
+        if not row:
+            # Queue খালি
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM sell_queue WHERE tg_user_id=%s AND status='sold'", (tg_user_id,))
+            total_sold = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM sell_queue WHERE tg_user_id=%s AND status='failed'", (tg_user_id,))
+            total_fail = cur.fetchone()[0]
+            cur.close(); conn.close()
+            sell_log_add(tg_user_id, f"✅ সব শেষ! Sold: {total_sold} | Failed: {total_fail}")
+            try:
+                conn = get_db(); cur = conn.cursor()
+                cur.execute("SELECT session_string, api_id, api_hash, target_username FROM user_sessions WHERE user_id=%s", (tg_user_id,))
+                srow = cur.fetchone(); cur.close(); conn.close()
+                if srow and srow[3]:
+                    async def _notify():
+                        c = TelegramClient(StringSession(srow[0]), int(srow[1]), srow[2])
+                        await c.connect()
+                        await c.send_message(srow[3], f"✅ AUTO SELL শেষ!\nTotal Sold: {total_sold}\nFailed: {total_fail}")
+                        await c.disconnect()
+                    lp = asyncio.new_event_loop(); lp.run_until_complete(_notify()); lp.close()
+            except Exception:
+                pass
+            break
+
+        queue_id, twofa_key, cookie = row
+
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("UPDATE sell_queue SET status='selling' WHERE id=%s", (queue_id,))
+            conn.commit(); cur.close(); conn.close()
+        except Exception:
+            pass
+
+        sell_log_add(tg_user_id, f"🚀 Selling #{queue_id}...")
+
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("SELECT session_string, api_id, api_hash FROM user_sessions WHERE user_id=%s", (tg_user_id,))
+            srow = cur.fetchone(); cur.close(); conn.close()
+        except Exception as e:
+            sell_log_add(tg_user_id, f"❌ Session DB error: {e}"); time.sleep(10); continue
+
+        if not srow:
+            sell_log_add(tg_user_id, "🔴 Session নেই! Sell বন্ধ।"); break
+
+        session_string, api_id, api_hash = srow
+        result_status = "timeout"
+
+        try:
+            async def _do_sell():
+                import re as _re
+                client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
+                await client.connect()
+                if not await client.is_user_authorized():
+                    await client.disconnect(); return "session_expired"
+                sold = False; task_off = False; rate_limit_secs = 0
+                step = {"current": 0}; too_often = {"count": 0, "max": 5}
+
+                async def try_click(msg, labels, fallback):
+                    for brow in (msg.buttons or []):
+                        for b in brow:
+                            bt = (getattr(b, "text", "") or "").strip()
+                            if any(l.lower() in bt.lower() for l in labels):
+                                try: await msg.click(text=bt); return True
+                                except: pass
+                    if fallback:
+                        await client.send_message(BOT, fallback); return True
+                    return False
+
+                @client.on(events.NewMessage(from_users=BOT))
+                @client.on(events.MessageEdited(from_users=BOT))
+                async def handler(event):
+                    nonlocal sold, task_off, rate_limit_secs
+                    if sold or task_off: return
+                    msg = event.message; text = msg.text or ""; low = text.lower()
+                    if is_task_off_message(text):
+                        task_off = True; return
+                    if "too often" in low or ("please wait" in low and "report" not in low):
+                        nums = _re.findall(r'\d+', text)
+                        wait_s = int(nums[0]) + 2 if nums else 35
+                        too_often["count"] += 1
+                        if too_often["count"] <= too_often["max"]:
+                            step["current"] = 0; await asyncio.sleep(wait_s)
+                            rate_limit_secs = wait_s; await client.send_message(BOT, "/start")
+                        else:
+                            rate_limit_secs = wait_s
+                        return
+                    if step["current"] == 0 and "welcome" in low:
+                        step["current"] = 1; await asyncio.sleep(1)
+                        await try_click(msg, ["tasks","task"], "📋 Tasks")
+                    elif step["current"] == 1 and "please select a task" in low:
+                        cb = any("🍪" in (getattr(b,"text","") or "") or "cookie" in (getattr(b,"text","") or "").lower()
+                                 for brow in (msg.buttons or []) for b in brow)
+                        if not cb: task_off = True; return
+                        step["current"] = 2; await asyncio.sleep(1)
+                        clicked = False
+                        for brow in (msg.buttons or []):
+                            for b in brow:
+                                bt = (getattr(b,"text","") or "").strip()
+                                if "🍪" in bt:
+                                    try: await msg.click(text=bt); clicked = True
+                                    except: pass
+                                if clicked: break
+                            if clicked: break
+                        if not clicked: task_off = True; return
+                    elif step["current"] == 2 and "🍪" in text:
+                        step["current"] = 3; await asyncio.sleep(1)
+                        await try_click(msg, ["2fa","create fb","no mail"], "🌟2FA:Create FB (No mail) ($0.0280)")
+                    elif step["current"] == 3 and ("description" in low or "required" in low or "review time" in low):
+                        step["current"] = 4; await asyncio.sleep(1)
+                        await try_click(msg, ["start","▶️"], "▶️ Start")
+                    elif step["current"] == 4 and ("2fa key" in low or "enter your 2fa" in low or "2fa" in low):
+                        step["current"] = 5; await asyncio.sleep(1)
+                        await client.send_message(BOT, twofa_key)
+                    elif step["current"] == 5 and ("send the account" in low or "please send" in low or "one-time code" in low or ("🍪" in text and "send" in low)):
+                        step["current"] = 6; await asyncio.sleep(1.5)
+                        await client.send_message(BOT, cookie)
+                    elif step["current"] == 6 and ("confirm registration" in low or "press the button" in low):
+                        step["current"] = 7; await asyncio.sleep(1)
+                        await try_click(msg, ["account registered","✅ account","registered"], "✅ Account registered")
+                    elif step["current"] >= 6 and ("report has been received" in low or "task submitted" in low or "submitted successfully" in low or ("received" in low and "wait" in low)):
+                        step["current"] = 8; sold = True
+
+                await client.send_message(BOT, "/start")
+                for _ in range(180):
+                    await asyncio.sleep(1)
+                    if sold or task_off: break
+                    if rate_limit_secs > 0 and too_often["count"] > too_often["max"]: break
+                client.remove_event_handler(handler)
+                await client.disconnect()
+                if sold: return "success"
+                if task_off: return "task_off"
+                if rate_limit_secs > 0: return "rate_limit"
+                return "timeout"
+
+            lp = asyncio.new_event_loop(); asyncio.set_event_loop(lp)
+            result_status = lp.run_until_complete(_do_sell()); lp.close()
+        except Exception as e:
+            result_status = "error"
+            sell_log_add(tg_user_id, f"❌ Sell error: {e}")
+
+        if result_status == "success":
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("UPDATE sell_queue SET status='sold', sold_at=%s WHERE id=%s", (int(time.time()), queue_id))
+            cur.execute("INSERT INTO sell_stats (user_id,sell_count) VALUES (%s,1) ON CONFLICT (user_id) DO UPDATE SET sell_count=sell_stats.sell_count+1", (tg_user_id,))
+            conn.commit(); cur.close(); conn.close()
+            sell_log_add(tg_user_id, f"✅ Sold #{queue_id}")
+            time.sleep(gap_sec)
+
+        elif result_status == "task_off":
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("UPDATE sell_queue SET status='pending' WHERE id=%s", (queue_id,))
+            conn.commit(); cur.close(); conn.close()
+            sell_log_add(tg_user_id, f"⚠️ Task OFF — {task_off_wait}s পর আবার চেক করবে...")
+            time.sleep(task_off_wait)
+
+        elif result_status == "session_expired":
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("UPDATE sell_queue SET status='pending' WHERE id=%s", (queue_id,))
+            conn.commit(); cur.close(); conn.close()
+            sell_log_add(tg_user_id, "🔴 Session expire! Sell বন্ধ।"); break
+
+        else:
+            # timeout/error → pending রাখো, retry limit নেই
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("UPDATE sell_queue SET status='pending', retry_count=retry_count+1 WHERE id=%s", (queue_id,))
+            conn.commit(); cur.close(); conn.close()
+            sell_log_add(tg_user_id, f"⏳ Retry #{queue_id} — {gap_sec}s পর...")
+            time.sleep(gap_sec)
+
+    _scheduler_running.pop(tg_user_id, None)
+
+
+def schedule_checker_loop():
+    """প্রতি 30s এ check — schedule start হওয়ার সময় হয়েছে কিনা।"""
+    print("[SCHED] Checker started", flush=True)
+    while True:
+        try:
+            now = int(time.time())
+            conn = get_db(); cur = conn.cursor()
+            cur.execute(
+                "SELECT tg_user_id, gap_seconds, task_off_wait_sec FROM sell_schedule WHERE enabled=TRUE AND start_time_epoch<=%s",
+                (now,)
+            )
+            due = cur.fetchall(); cur.close(); conn.close()
+
+            for (tg_user_id, gap_sec, task_off_wait) in due:
+                conn2 = get_db(); cur2 = conn2.cursor()
+                cur2.execute("SELECT COUNT(*) FROM sell_queue WHERE tg_user_id=%s AND status='pending'", (tg_user_id,))
+                pending = cur2.fetchone()[0]; cur2.close(); conn2.close()
+                if pending == 0:
+                    conn3 = get_db(); cur3 = conn3.cursor()
+                    cur3.execute("UPDATE sell_schedule SET enabled=FALSE WHERE tg_user_id=%s", (tg_user_id,))
+                    conn3.commit(); cur3.close(); conn3.close()
+                    continue
+                if _scheduler_running.get(tg_user_id):
+                    continue
+                threading.Thread(
+                    target=run_scheduled_sell_for_user,
+                    args=(tg_user_id, gap_sec, task_off_wait),
+                    daemon=True
+                ).start()
+                conn4 = get_db(); cur4 = conn4.cursor()
+                cur4.execute("UPDATE sell_schedule SET enabled=FALSE WHERE tg_user_id=%s", (tg_user_id,))
+                conn4.commit(); cur4.close(); conn4.close()
+
+        except Exception as e:
+            print(f"[SCHED] Checker error: {e}", flush=True)
+        time.sleep(30)
+
+
+_sched_thread = threading.Thread(target=schedule_checker_loop, daemon=True)
+_sched_thread.start()
 
 
 # ══════════════════════════════════════════════════
