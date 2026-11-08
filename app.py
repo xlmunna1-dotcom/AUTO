@@ -1241,11 +1241,14 @@ def send_otp():
 
 @app.route("/verify_otp", methods=["POST"])
 def verify_otp():
-    data            = request.json
-    phone           = data["phone"]
-    otp             = data["otp"]
-    tg_user_id      = data["tg_user_id"]
-    target_username = data["target_username"]
+    data            = request.get_json(silent=True) or {}
+    phone           = data.get("phone", "").strip()
+    otp             = data.get("otp", "").strip()
+    tg_user_id      = (data.get("tg_user_id") or data.get("user_id", "")).strip()
+    target_username = (data.get("target_username") or data.get("target", "@admin")).strip()
+
+    if not phone or not otp or not tg_user_id:
+        return jsonify({"status": "error", "message": "phone, otp, tg_user_id দরকার।"}), 400
 
     conn = get_db(); cur = conn.cursor()
     cur.execute(
