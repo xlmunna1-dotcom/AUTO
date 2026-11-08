@@ -1370,8 +1370,23 @@ def automate_sale():
                 await asyncio.sleep(1)
                 await try_click_or_send(msg, ["tasks", "task"], "📋 Tasks")
 
-            # STEP 1 → 2: Task selection menu
+            # STEP 1 → 2: Task selection menu — keyboard এ 🍪 আছে কিনা চেক করো
             elif step["current"] == 1 and "please select a task" in low:
+                cookie_btn_found = False
+                for button_row in (msg.buttons or []):
+                    for button in button_row:
+                        bt = (getattr(button, "text", "") or "").strip()
+                        if "🍪" in bt or "cookie" in bt.lower():
+                            cookie_btn_found = True
+                            break
+                    if cookie_btn_found:
+                        break
+
+                if not cookie_btn_found:
+                    step["current"] = -1  # task_off
+                    print(f"[AUTOMATE_SALE] Task OFF — 🍪 button নেই", flush=True)
+                    return
+
                 step["current"] = 2
                 await asyncio.sleep(1)
                 await try_click_or_send(msg, ["🍪", "cookie"], "🍪 ($0.0280)")
@@ -1445,7 +1460,7 @@ def automate_sale():
                         pass
 
         await client.send_message(BOT, "/start")
-        for _ in range(660):   # 11 মিনিট — Android timeout এর সাথে মিলিয়ে
+        for _ in range(120):   # 2 মিনিট — sell gap এর সাথে মিলিয়ে
             await asyncio.sleep(1)
             if step["current"] == 8:
                 break
@@ -1586,8 +1601,25 @@ def auto_sell_endpoint():
                 await asyncio.sleep(1)
                 await try_click_or_send(msg, ["tasks", "task"], "📋 Tasks")
 
-            # STEP 1 → 2: Task menu
+            # STEP 1 → 2: Task menu — keyboard এ 🍪 আছে কিনা চেক করো
             elif step["current"] == 1 and "please select a task" in low:
+                # Keyboard এ 🍪 button খোঁজো
+                cookie_btn_found = False
+                for button_row in (msg.buttons or []):
+                    for button in button_row:
+                        bt = (getattr(button, "text", "") or "").strip()
+                        if "🍪" in bt or "cookie" in bt.lower():
+                            cookie_btn_found = True
+                            break
+                    if cookie_btn_found:
+                        break
+
+                if not cookie_btn_found:
+                    # 🍪 button নেই → Task OFF
+                    task_off = True
+                    print(f"[AUTO_SELL] Task OFF — 🍪 button নেই keyboard এ", flush=True)
+                    return
+
                 step["current"] = 2
                 await asyncio.sleep(1)
                 await try_click_or_send(msg, ["🍪", "cookie"], "🍪 ($0.0280)")
@@ -1655,7 +1687,7 @@ def auto_sell_endpoint():
                 sold = True
 
         await client.send_message(BOT, "/start")
-        for _ in range(660):  # 11 মিনিট — Android timeout এর সাথে মিলিয়ে
+        for _ in range(120):  # 2 মিনিট — sell gap এর সাথে মিলিয়ে
             await asyncio.sleep(1)
             if step["current"] == 8:
                 break
@@ -1670,7 +1702,7 @@ def auto_sell_endpoint():
         if sold:
             return "success", "Sale সম্পন্ন", 0
         if task_off:
-            return "task_off", "Conversation reset — task নেই", 300
+            return "task_off", "Task OFF — 🍪 button নেই", 0
         if rate_limit_secs > 0:
             return "rate_limit", "Rate limited", rate_limit_secs
         return "timeout", f"Step: {step['current']}/8", 0
