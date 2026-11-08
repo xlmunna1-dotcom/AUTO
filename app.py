@@ -126,16 +126,28 @@ def is_task_off_message(text):
         return False
     low = text.lower()
     patterns = [
+        # Bot এর real reset messages
         "conversation was reset",
+        "previous conversation was reset",
         "please start again",
         "start again from the main menu",
         "previous conversation",
+        # Action cancel / task cancel
+        "action cancel",
+        "action was cancel",
+        "task cancel",
+        "task was cancel",
+        "cancel the task",
+        # Task unavailable
         "session expired",
         "task is off", "tasks are off",
         "task not available", "no task available",
         "temporarily unavailable",
         "try again later",
         "under maintenance",
+        # Bot reset variants
+        "has been reset",
+        "reset, please",
     ]
     return any(p in low for p in patterns)
 
@@ -1392,7 +1404,24 @@ def automate_sale():
 
                 step["current"] = 2
                 await asyncio.sleep(1)
-                await try_click_or_send(msg, ["🍪", "cookie"], "🍪 ($0.0280)")
+                # শুধু exact "🍪 ($0.0280)" button থাকলেই click — অন্য কিছু হলে task_off
+                exact_btn = "🍪 ($0.0280)"
+                clicked = False
+                for button_row in (msg.buttons or []):
+                    for button in button_row:
+                        bt = (getattr(button, "text", "") or "").strip()
+                        if bt == exact_btn:
+                            try:
+                                await msg.click(text=bt)
+                                clicked = True
+                            except Exception:
+                                pass
+                        if clicked: break
+                    if clicked: break
+                if not clicked:
+                    task_off = True
+                    print(f"[AUTOMATE_SALE] Task OFF — 🍪 ($0.0280) button নেই", flush=True)
+                    return
 
             # STEP 2 → 3: Cookie task list দেখালে 2FA task বেছে নাও
             elif step["current"] == 2 and "🍪" in text:
@@ -1625,7 +1654,24 @@ def auto_sell_endpoint():
 
                 step["current"] = 2
                 await asyncio.sleep(1)
-                await try_click_or_send(msg, ["🍪", "cookie"], "🍪 ($0.0280)")
+                # শুধু exact "🍪 ($0.0280)" button থাকলেই click — অন্য কিছু হলে task_off
+                exact_btn = "🍪 ($0.0280)"
+                clicked = False
+                for button_row in (msg.buttons or []):
+                    for button in button_row:
+                        bt = (getattr(button, "text", "") or "").strip()
+                        if bt == exact_btn:
+                            try:
+                                await msg.click(text=bt)
+                                clicked = True
+                            except Exception:
+                                pass
+                        if clicked: break
+                    if clicked: break
+                if not clicked:
+                    task_off = True
+                    print(f"[AUTO_SELL] Task OFF — 🍪 ($0.0280) button নেই", flush=True)
+                    return
 
             # STEP 2 → 3: Cookie list → 2FA task
             elif step["current"] == 2 and "🍪" in text:
