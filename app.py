@@ -12,6 +12,7 @@ import datetime
 import threading
 import html
 import psycopg2
+import requests as _requests
 from flask import Flask, request, jsonify
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -137,6 +138,113 @@ def is_task_off_message(text):
         "under maintenance",
     ]
     return any(p in low for p in patterns)
+
+
+# ══════════════════════════════════════════════════════════
+#  COOKIE VALIDATOR HELPER
+# ══════════════════════════════════════════════════════════
+
+def check_fb_cookie_valid(cookie: str) -> dict:
+    """
+    Facebook cookie valid কিনা চেক করে।
+    Returns: {"valid": bool, "uid": str or None, "reason": str}
+    """
+    if not cookie or "c_user=" not in cookie:
+        return {"valid": False, "uid": None, "reason": "c_user= নেই"}
+
+    # UID বের করো cookie থেকে
+    uid = None
+    for part in cookie.split(";"):
+        part = part.strip()
+        if part.startswith("c_user="):
+            uid = part.split("=", 1)[1].strip()
+            break
+
+    headers = {
+        "Cookie": cookie,
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 11; Redmi Note 8) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Mobile Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        r = _requests.get(
+            "https://m.facebook.com/",
+            headers=headers,
+            timeout=15,
+            allow_redirects=True
+        )
+        text = r.text.lower()
+        url  = r.url.lower()
+
+        # Checkpoint / disabled
+        if "checkpoint" in url or "checkpoint" in text:
+            return {"valid": False, "uid": uid, "reason": "Checkpoint — account locked"}
+        if "disabled" in text or "suspended" in text:
+            return {"valid": False, "uid": uid, "reason": "Account disabled"}
+        # Login page মানে cookie expire
+        if "login" in url and "m.facebook.com/login" in url:
+            return {"valid": False, "uid": uid, "reason": "Cookie expired — redirected to login"}
+        # Logged in indicator
+        if "logout" in text or "log out" in text or (uid and uid in text):
+            return {"valid": True, "uid": uid, "reason": "Active"}
+
+        return {"valid": False, "uid": uid, "reason": "Unknown state"}
+
+    except Exception as e:
+        return {"valid": False, "uid": uid, "reason": f"Network error: {e}"}
+
+
+# ══════════════════════════════════════════════════════════
+#  FLASK ENDPOINT — /check_cookie  (single cookie check)
+# ══════════════════════════════════════════════════════════
+
+@app.route("/check_cookie", methods=["POST"])
+def api_check_cookie():
+    """
+    Android AUTO SELL panel থেকে cookie valid কিনা চেক করে।
+    Body: {"cookie": "...", "twofa_key": "...(optional)..."}
+    Response: {"valid": bool, "uid": str, "reason": str}
+    """
+    data   = request.get_json(silent=True) or {}
+    cookie = str(data.get("cookie", "")).strip()
+
+    if not cookie:
+        return jsonify({"valid": False, "uid": None, "reason": "Cookie missing"}), 400
+
+    result = check_fb_cookie_valid(cookie)
+    return jsonify(result), 200
+
+
+# ══════════════════════════════════════════════════════════
+#  FLASK ENDPOINT — /batch_check_cookies  (bulk check)
+# ══════════════════════════════════════════════════════════
+
+@app.route("/batch_check_cookies", methods=["POST"])
+def api_batch_check_cookies():
+    """
+    AUTO SELL panel এর ২ মিনিট পরপর bulk cookie check।
+    Body: {"accounts": [{"id": "...", "cookie": "...", "twofa_key": "..."}, ...]}
+    Response: {"results": [{"id": "...", "valid": bool, "uid": str, "reason": str}, ...]}
+    """
+    data     = request.get_json(silent=True) or {}
+    accounts = data.get("accounts", [])
+
+    if not accounts or not isinstance(accounts, list):
+        return jsonify({"results": []}), 400
+
+    results = []
+    for acc in accounts:
+        acc_id  = str(acc.get("id", ""))
+        cookie  = str(acc.get("cookie", "")).strip()
+        result  = check_fb_cookie_valid(cookie)
+        result["id"] = acc_id
+        results.append(result)
+        time.sleep(0.3)   # rate limit এড়াতে ছোট delay
+
+    return jsonify({"results": results}), 200
 
 
 def ensure_tables():
@@ -1187,8 +1295,8 @@ def automate_sale():
 
     if not twofa_key:
         return jsonify({"status": "error", "message": "2FA key দরকার।"}), 400
-    if not cookie:
-        return jsonify({"status": "error", "message": "Cookie দরকার।"}), 400
+    if not cookie or "c_user=" not in cookie:
+        return jsonify({"status": "error", "message": "Cookie invalid — c_user= নেই।"}), 400
 
     conn = get_db(); cur = conn.cursor()
     cur.execute(
@@ -1323,7 +1431,7 @@ def automate_sale():
                 "task submitted successfully" in low or
                 "submitted successfully" in low or
                 "received! please wait" in low or
-                "received" in low and "wait" in low
+                ("received" in low and "wait" in low)
             ):
                 step["current"] = 8
                 sold = True
@@ -1337,7 +1445,7 @@ def automate_sale():
                         pass
 
         await client.send_message(BOT, "/start")
-        for _ in range(600):
+        for _ in range(660):   # 11 মিনিট — Android timeout এর সাথে মিলিয়ে
             await asyncio.sleep(1)
             if step["current"] == 8:
                 break
@@ -1537,15 +1645,17 @@ def auto_sell_endpoint():
             # STEP 7 → 8: Success
             elif step["current"] >= 6 and (
                 "report has been received" in low
+                or "your report has been received" in low
                 or "task submitted successfully" in low
                 or "submitted successfully" in low
+                or "received! please wait" in low
                 or ("received" in low and "wait" in low)
             ):
                 step["current"] = 8
                 sold = True
 
         await client.send_message(BOT, "/start")
-        for _ in range(300):  # 5 min max
+        for _ in range(660):  # 11 মিনিট — Android timeout এর সাথে মিলিয়ে
             await asyncio.sleep(1)
             if step["current"] == 8:
                 break
@@ -1585,7 +1695,8 @@ def auto_sell_endpoint():
                 try:
                     loop2 = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop2)
-                    loop2.run_until_complete(_notify_sold(target_username, twofa_key))
+                    # ✅ FIX: tg_user_id পাস করো session lookup এর জন্য
+                    loop2.run_until_complete(_notify_sold(tg_user_id, target_username, twofa_key))
                     loop2.close()
                 except Exception:
                     pass
@@ -1627,25 +1738,37 @@ def auto_sell_endpoint():
         }), 500
 
 
-async def _notify_sold(target_username, twofa_key):
-    """AUTO SELL সফল হলে target user কে Telegram এ notify করো।"""
+async def _notify_sold(tg_user_id: str, target_username: str, twofa_key: str):
+    """
+    AUTO SELL সফল হলে target user কে Telegram এ notify করো।
+    tg_user_id  — DB তে session খোঁজার key (numeric Telegram ID)
+    target_username — message পাঠানোর destination (@username বা numeric id)
+    """
+    if not target_username:
+        return
     try:
         conn = get_db(); cur = conn.cursor()
+        # ✅ FIX: tg_user_id দিয়ে session lookup করো, target_username দিয়ে নয়
         cur.execute(
             "SELECT session_string, api_id, api_hash FROM user_sessions WHERE user_id = %s",
-            (target_username,)
+            (tg_user_id,)
         )
         row = cur.fetchone(); cur.close(); conn.close()
         if row:
             client = TelegramClient(StringSession(row[0]), int(row[1]), row[2])
             await client.connect()
-            await client.send_message(
-                target_username,
-                f"🎉 AUTO SELL সফল!\n2FA Key: {twofa_key}"
-            )
+            if await client.is_user_authorized():
+                await client.send_message(
+                    target_username,
+                    f"🎉 AUTO SELL সফল!\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"🔑 2FA Key : {twofa_key}\n"
+                    f"⏰ সময়    : {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+                    f"━━━━━━━━━━━━━━"
+                )
             await client.disconnect()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[NOTIFY] Error: {e}", flush=True)
 
 
 @app.route("/automate_cookie_sale", methods=["POST"])
@@ -1783,38 +1906,63 @@ def automate_cookie_sale():
 
 @app.route("/check_session", methods=["POST"])
 def check_session():
-    data       = request.json
-    tg_user_id = data.get("tg_user_id", "")
+    data       = request.get_json(silent=True) or {}
+    tg_user_id = str(data.get("tg_user_id", "")).strip()
     if not tg_user_id:
-        return jsonify({"status": "invalid"}), 400
+        return jsonify({"status": "invalid", "message": "tg_user_id দরকার।"}), 400
+
     conn = get_db(); cur = conn.cursor()
     cur.execute(
-        "SELECT session_string, api_id, api_hash FROM user_sessions WHERE user_id = %s",
+        "SELECT session_string, api_id, api_hash, target_username FROM user_sessions WHERE user_id = %s",
         (tg_user_id,)
     )
     row = cur.fetchone(); cur.close(); conn.close()
     if not row:
-        return jsonify({"status": "invalid", "message": "Session নেই।"})
-    session_string, api_id, api_hash = row
+        return jsonify({"status": "invalid", "message": "Session নেই — আগে Connect করুন।"})
+
+    session_string, api_id, api_hash, target_username = row
 
     async def _check():
         client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
         await client.connect()
         authorized = await client.is_user_authorized()
+        me = None
+        if authorized:
+            try:
+                me = await client.get_me()
+            except Exception:
+                pass
         await client.disconnect()
-        return authorized
+        return authorized, me
 
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        authorized = loop.run_until_complete(_check())
+        authorized, me = loop.run_until_complete(_check())
         loop.close()
+
         if authorized:
-            return jsonify({"status": "valid"})
+            tg_name     = ""
+            tg_username = ""
+            tg_id_str   = ""
+            if me:
+                tg_name     = (me.first_name or "") + (" " + (me.last_name or "") if me.last_name else "")
+                tg_username = me.username or ""
+                tg_id_str   = str(me.id)
+            return jsonify({
+                "status"        : "valid",
+                "tg_name"       : tg_name.strip(),
+                "tg_username"   : tg_username,
+                "tg_id"         : tg_id_str,
+                "target_username": target_username or "",
+            })
+
+        # Expired → DB থেকে সরাও
         conn = get_db(); cur = conn.cursor()
         cur.execute("DELETE FROM user_sessions WHERE user_id = %s", (tg_user_id,))
         conn.commit(); cur.close(); conn.close()
-        return jsonify({"status": "invalid", "message": "Session expire হয়েছে।"})
+        return jsonify({"status": "invalid", "message": "Session expire হয়েছে — আবার Connect করুন।"})
+
     except Exception as e:
         return jsonify({"status": "invalid", "message": str(e)})
 
