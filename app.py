@@ -133,11 +133,12 @@ def is_task_off_message(text):
         "start again from the main menu",
         "previous conversation",
         # Action cancel / task cancel
+        # ⚠️ "cancel the task" সরানো হয়েছে কারণ Bot confirm message এ
+        # "confirm registration or cancel the task" বলে — সেটা Task OFF না!
         "action cancel",
         "action was cancel",
         "task cancel",
         "task was cancel",
-        "cancel the task",
         # Task unavailable
         "session expired",
         "task is off", "tasks are off",
@@ -2382,30 +2383,31 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
                         step["current"] = 5; await asyncio.sleep(1)
                         await client.send_message(BOT, twofa_key)
 
-                    # ── Step 5: OTP code দেওয়ার পর cookie চাওয়া → cookie পাঠাও ──
-                    # Bot: "949412\n📋 Your one-time code:\n...Please send the account 🍪:"
-                    # NOTE: Bot একটাই message এ OTP + cookie request পাঠায়!
+                    # ── Step 5: OTP + cookie request একই message এ আসে ──
+                    # Bot: "220219\n📋 Your one-time code:\n👆 Tap the code to copy\nPlease send the account 🍪:"
                     elif step["current"] == 5 and (
+                        "one-time code" in low or
                         "please send the account" in low or
                         "send the account" in low or
-                        "please send" in low or
-                        "one-time code" in low or
-                        ("🍪" in text and "send" in low)
+                        ("🍪" in text and "send" in low) or
+                        "please send" in low
                     ):
-                        step["current"] = 6; await asyncio.sleep(1.5)
+                        step["current"] = 6
+                        await asyncio.sleep(2)
                         await client.send_message(BOT, cookie)
 
-                    # ── Step 6: Confirm registration → Reply Keyboard এ text পাঠাও ──
+                    # ── Step 6: Cookie পাঠানোর পর confirm message আসলে ──
                     # Bot: "👉 Press the button to confirm registration or cancel the task:"
-                    # ⚠️ এটা Reply Keyboard — msg.click() কাজ করে না!
-                    # সরাসরি text message পাঠাতে হবে
+                    # ⚠️ Reply Keyboard — msg.click() কাজ করে না!
+                    # সরাসরি "✅ Account registered" text পাঠাতে হবে
                     elif step["current"] == 6 and (
                         "press the button" in low or
                         "confirm registration" in low or
-                        "confirm" in low
+                        "registration" in low or
+                        "cancel the task" in low
                     ):
-                        step["current"] = 7; await asyncio.sleep(1)
-                        # Reply Keyboard এ সরাসরি text পাঠাও
+                        step["current"] = 7
+                        await asyncio.sleep(2)
                         await client.send_message(BOT, "✅ Account registered")
 
                     # ── Step 7/SOLD: Task submitted / received ──
