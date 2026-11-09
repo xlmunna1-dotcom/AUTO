@@ -1440,12 +1440,11 @@ def automate_sale():
                 step["current"] = 2
                 await asyncio.sleep(1)
                 # শুধু exact "🍪 ($0.0280)" button থাকলেই click — অন্য কিছু হলে task_off
-                exact_btn = "🍪 ($0.0280)"
                 clicked = False
                 for button_row in (msg.buttons or []):
                     for button in button_row:
                         bt = (getattr(button, "text", "") or "").strip()
-                        if bt == exact_btn:
+                        if "🍪" in bt:
                             try:
                                 await msg.click(text=bt)
                                 clicked = True
@@ -1492,19 +1491,28 @@ def automate_sale():
                 await asyncio.sleep(1.5)
                 await client.send_message(BOT, cookie)
 
-            # STEP 6 → 7: Confirm registration button আসলে click করো
-            elif step["current"] == 6 and (
+            # STEP 6 → 7: Confirm registration (step 5 বা 6 যেকোনো সময় আসতে পারে)
+            elif step["current"] >= 5 and (
                 "confirm registration" in low or
                 "press the button" in low or
                 "cancel the task" in low
             ):
                 step["current"] = 7
                 await asyncio.sleep(1)
-                await try_click_or_send(
-                    msg,
-                    ["account registered", "✅ account", "registered"],
-                    "✅ Account registered"
-                )
+                clicked = False
+                for button_row in (msg.buttons or []):
+                    for button in button_row:
+                        bt = (getattr(button, "text", "") or "").strip()
+                        if "registered" in bt.lower() or "✅" in bt:
+                            try:
+                                await msg.click(text=bt)
+                                clicked = True
+                            except Exception:
+                                pass
+                        if clicked: break
+                    if clicked: break
+                if not clicked:
+                    await client.send_message(BOT, "✅ Account registered")
 
             # STEP 7 → 8: সফলভাবে জমা হলে
             elif step["current"] >= 6 and (
@@ -1690,12 +1698,11 @@ def auto_sell_endpoint():
                 step["current"] = 2
                 await asyncio.sleep(1)
                 # শুধু exact "🍪 ($0.0280)" button থাকলেই click — অন্য কিছু হলে task_off
-                exact_btn = "🍪 ($0.0280)"
                 clicked = False
                 for button_row in (msg.buttons or []):
                     for button in button_row:
                         bt = (getattr(button, "text", "") or "").strip()
-                        if bt == exact_btn:
+                        if "🍪" in bt:
                             try:
                                 await msg.click(text=bt)
                                 clicked = True
@@ -1745,18 +1752,30 @@ def auto_sell_endpoint():
                 await asyncio.sleep(1.5)
                 await client.send_message(BOT, cookie)
 
-            # STEP 6 → 7: Confirm registration
-            elif step["current"] == 6 and (
+            # STEP 6 → 7: Confirm registration (step 5 বা 6 যেকোনো সময় আসতে পারে)
+            elif step["current"] >= 5 and (
                 "confirm registration" in low
                 or "press the button" in low
+                or "cancel the task" in low
             ):
                 step["current"] = 7
                 await asyncio.sleep(1)
-                await try_click_or_send(
-                    msg,
-                    ["account registered", "✅ account", "registered"],
-                    "✅ Account registered"
-                )
+                # সরাসরি button খুঁজে click করো
+                clicked = False
+                for button_row in (msg.buttons or []):
+                    for button in button_row:
+                        bt = (getattr(button, "text", "") or "").strip()
+                        if "registered" in bt.lower() or "✅" in bt:
+                            try:
+                                await msg.click(text=bt)
+                                clicked = True
+                            except Exception:
+                                pass
+                        if clicked: break
+                    if clicked: break
+                if not clicked:
+                    # fallback — text পাঠাও
+                    await client.send_message(BOT, "✅ Account registered")
 
             # STEP 7 → 8: Success
             elif step["current"] >= 6 and (
@@ -2388,6 +2407,7 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
             cur.execute("INSERT INTO sell_stats (user_id,sell_count) VALUES (%s,1) ON CONFLICT (user_id) DO UPDATE SET sell_count=sell_stats.sell_count+1", (tg_user_id,))
             conn.commit(); cur.close(); conn.close()
             sell_log_add(tg_user_id, f"✅ Sold #{queue_id}")
+            sell_log_add(tg_user_id, f"⏳ পরের sell {gap_sec} সেকেন্ড পরে...")
             time.sleep(gap_sec)
 
         elif result_status == "task_off":
@@ -2408,7 +2428,7 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
             conn = get_db(); cur = conn.cursor()
             cur.execute("UPDATE sell_queue SET status='pending', retry_count=retry_count+1 WHERE id=%s", (queue_id,))
             conn.commit(); cur.close(); conn.close()
-            sell_log_add(tg_user_id, f"⏳ Retry #{queue_id} — {gap_sec}s পর...")
+            sell_log_add(tg_user_id, f"🔄 Retry #{queue_id} — {gap_sec} সেকেন্ড পরে আবার চেষ্টা...")
             time.sleep(gap_sec)
 
     _scheduler_running.pop(tg_user_id, None)
