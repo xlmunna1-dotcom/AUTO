@@ -32,9 +32,7 @@ BOT             = "@Taskl1_bot"
 COOKIE_SELL_BOT = "@QuickTaskPay1bot"
 
 # ── LICENSE BOT CONFIG ──
-LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN")
-if not LICENSE_BOT_TOKEN:
-    raise RuntimeError("❌ LICENSE_BOT_TOKEN environment variable সেট করুন!")
+LICENSE_BOT_TOKEN  = os.environ.get("LICENSE_BOT_TOKEN", "9285384211:AAF2tNUo5IpfTg9sEt2EJ8P9gTraXxcMOtI")
 ADMIN_IDS          = list(map(int, os.environ.get("ADMIN_IDS", "8301781046").split(",")))
 DEVELOPER_USERNAME = os.environ.get("DEVELOPER_USERNAME", "@NEXEX_99")
 APP_NAME           = os.environ.get("APP_NAME", "SuperToolsX")
@@ -2318,8 +2316,12 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
                     nonlocal sold, task_off, rate_limit_secs
                     if sold or task_off: return
                     msg = event.message; text = msg.text or ""; low = text.lower()
+
+                    # ── Task OFF চেক ──
                     if is_task_off_message(text):
                         task_off = True; return
+
+                    # ── Rate limit চেক ──
                     if "too often" in low or ("please wait" in low and "report" not in low):
                         nums = _re.findall(r'\d+', text)
                         wait_s = int(nums[0]) + 2 if nums else 35
@@ -2330,40 +2332,89 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
                         else:
                             rate_limit_secs = wait_s
                         return
+
+                    # ── Step 0: Welcome → Tasks বাটনে ক্লিক ──
+                    # Bot: "👋 Welcome! ..."
                     if step["current"] == 0 and "welcome" in low:
                         step["current"] = 1; await asyncio.sleep(1)
-                        await try_click(msg, ["tasks","task"], "📋 Tasks")
+                        await try_click(msg, ["tasks", "task"], "📋 Tasks")
+
+                    # ── Step 1: Task list → 🍪 বাটন আছে কিনা চেক করে ক্লিক ──
+                    # Bot: "👇 Please select a task:"
+                    # Reply keyboard এ 🍪 ($0.0280) থাকলে Task ON, না থাকলে Task OFF
                     elif step["current"] == 1 and "please select a task" in low:
-                        cb = any("🍪" in (getattr(b,"text","") or "") or "cookie" in (getattr(b,"text","") or "").lower()
-                                 for brow in (msg.buttons or []) for b in brow)
-                        if not cb: task_off = True; return
+                        # Reply keyboard এ 🍪 আছে কিনা চেক
+                        has_cookie_btn = any(
+                            "🍪" in (getattr(b, "text", "") or "")
+                            for brow in (msg.buttons or []) for b in brow
+                        )
+                        if not has_cookie_btn:
+                            task_off = True; return
                         step["current"] = 2; await asyncio.sleep(1)
+                        # 🍪 ($0.0280) বাটনে ক্লিক
                         clicked = False
                         for brow in (msg.buttons or []):
                             for b in brow:
-                                bt = (getattr(b,"text","") or "").strip()
+                                bt = (getattr(b, "text", "") or "").strip()
                                 if "🍪" in bt:
                                     try: await msg.click(text=bt); clicked = True
                                     except: pass
                                 if clicked: break
                             if clicked: break
-                        if not clicked: task_off = True; return
+                        if not clicked:
+                            await client.send_message(BOT, "🍪 ($0.0280)")
+
+                    # ── Step 2: 🍪 task details → 2FA task select ──
+                    # Bot: "🍪:" (task list দেখায়)
                     elif step["current"] == 2 and "🍪" in text:
                         step["current"] = 3; await asyncio.sleep(1)
-                        await try_click(msg, ["2fa","create fb","no mail"], "🌟2FA:Create FB (No mail) ($0.0280)")
+                        await try_click(msg, ["2fa", "create fb", "no mail"], "🌟2FA:Create FB (No mail) ($0.0280)")
+
+                    # ── Step 3: Task description → Start ──
+                    # Bot: "⏳ Review time: 64 min ... Description: 🔐 REQUIRED! ..."
                     elif step["current"] == 3 and ("description" in low or "required" in low or "review time" in low):
                         step["current"] = 4; await asyncio.sleep(1)
-                        await try_click(msg, ["start","▶️"], "▶️ Start")
+                        await try_click(msg, ["start", "▶️"], "▶️ Start")
+
+                    # ── Step 4: 2FA key চাওয়া → key পাঠাও ──
+                    # Bot: "🔑 Please enter your 2FA key to get the code:"
                     elif step["current"] == 4 and ("2fa key" in low or "enter your 2fa" in low or "2fa" in low):
                         step["current"] = 5; await asyncio.sleep(1)
                         await client.send_message(BOT, twofa_key)
-                    elif step["current"] == 5 and ("send the account" in low or "please send" in low or "one-time code" in low or ("🍪" in text and "send" in low)):
+
+                    # ── Step 5: OTP code দেওয়ার পর cookie চাওয়া → cookie পাঠাও ──
+                    # Bot: "949412\n📋 Your one-time code:\n...Please send the account 🍪:"
+                    # NOTE: Bot একটাই message এ OTP + cookie request পাঠায়!
+                    elif step["current"] == 5 and (
+                        "please send the account" in low or
+                        "send the account" in low or
+                        "please send" in low or
+                        "one-time code" in low or
+                        ("🍪" in text and "send" in low)
+                    ):
                         step["current"] = 6; await asyncio.sleep(1.5)
                         await client.send_message(BOT, cookie)
-                    elif step["current"] == 6 and ("confirm registration" in low or "press the button" in low):
+
+                    # ── Step 6: Confirm registration → Reply Keyboard এ text পাঠাও ──
+                    # Bot: "👉 Press the button to confirm registration or cancel the task:"
+                    # ⚠️ এটা Reply Keyboard — msg.click() কাজ করে না!
+                    # সরাসরি text message পাঠাতে হবে
+                    elif step["current"] == 6 and (
+                        "press the button" in low or
+                        "confirm registration" in low or
+                        "confirm" in low
+                    ):
                         step["current"] = 7; await asyncio.sleep(1)
-                        await try_click(msg, ["account registered","✅ account","registered"], "✅ Account registered")
-                    elif step["current"] >= 6 and ("report has been received" in low or "task submitted" in low or "submitted successfully" in low or ("received" in low and "wait" in low)):
+                        # Reply Keyboard এ সরাসরি text পাঠাও
+                        await client.send_message(BOT, "✅ Account registered")
+
+                    # ── Step 7/SOLD: Task submitted / received ──
+                    elif step["current"] >= 6 and (
+                        "report has been received" in low or
+                        "task submitted" in low or
+                        "submitted successfully" in low or
+                        ("received" in low and "wait" in low)
+                    ):
                         step["current"] = 8; sold = True
 
                 await client.send_message(BOT, "/start")
