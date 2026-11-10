@@ -2518,4 +2518,4 @@ def schedule_checker_loop():
                 conn4.commit(); cur4.close(); conn4.close()
 
         except Exception as e:
-            print(f"[SCHED] Checker 
+            print(f"[SCHED] Checker error: {e}", flush=True) 
