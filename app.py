@@ -2519,5 +2519,4 @@ def schedule_checker_loop():
                     args=(tg_user_id, gap_sec, task_off_wait),
                     daemon=True
                 ).start()
-                conn4 = get_db(); cur4 = conn4.cursor()
-                cur4.execute("UPDATE sell_schedule SET 
+                                cur4.execute("UPDATE sell_schedule SET enabled=FALSE WHERE tg_user_id=%s", (tg_user_id,)) 
