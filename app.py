@@ -38,6 +38,9 @@ DEVELOPER_USERNAME = os.environ.get("DEVELOPER_USERNAME", "@NEXEX_99")
 APP_NAME           = os.environ.get("APP_NAME", "SuperToolsX")
 TG_BOT_LINK        = os.environ.get("TG_BOT_LINK", "https://t.me/SUPER_WORKER_KEY_99_bot")
 
+# ── SELL BOT CONFIG (bot.py এর বট) ──
+SELL_BOT_TOKEN = os.environ.get("SELL_BOT_TOKEN", "")   # bot.py এর BOT_TOKEN এখানে দিন
+
 # ── FORCE JOIN CONFIG ──
 FORCE_CHANNEL_USERNAME = "@SUPER_WORKERS"  # চ্যানেলের ইউজারনেম
 FORCE_CHANNEL_LINK     = "https://t.me/SUPER_WORKERS"
@@ -133,12 +136,11 @@ def is_task_off_message(text):
         "start again from the main menu",
         "previous conversation",
         # Action cancel / task cancel
-        # ⚠️ "cancel the task" সরানো হয়েছে কারণ Bot confirm message এ
-        # "confirm registration or cancel the task" বলে — সেটা Task OFF না!
         "action cancel",
         "action was cancel",
         "task cancel",
         "task was cancel",
+        "cancel the task",
         # Task unavailable
         "session expired",
         "task is off", "tasks are off",
@@ -351,6 +353,20 @@ def ensure_tables():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sell_log_user ON sell_log(tg_user_id, log_time DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sell_queue_user ON sell_queue(tg_user_id, status)")
+
+    # ── AUTHORIZED APP USERS (key দিয়ে app এ ঢোকা ইউজারদের record) ──
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS authorized_app_users (
+            tg_id        TEXT PRIMARY KEY,
+            tg_username  TEXT DEFAULT '',
+            tg_name      TEXT DEFAULT '',
+            license_key  TEXT DEFAULT '',
+            device_id    TEXT DEFAULT '',
+            first_login  BIGINT DEFAULT 0,
+            last_login   BIGINT DEFAULT 0,
+            login_count  INTEGER DEFAULT 1
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -512,6 +528,50 @@ def is_admin(uid: int) -> bool:
 #  FLASK ENDPOINT — /validate_key
 # ══════════════════════════════════════════════════════════
 
+def _save_authorized_user(tg_id: str, tg_username: str, tg_name: str,
+                           license_key: str, device_id: str):
+    """App login করা ইউজারকে authorized_app_users table এ save করে।"""
+    try:
+        now  = int(time.time())
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO authorized_app_users
+                (tg_id, tg_username, tg_name, license_key, device_id, first_login, last_login, login_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 1)
+            ON CONFLICT (tg_id) DO UPDATE SET
+                tg_username = EXCLUDED.tg_username,
+                tg_name     = EXCLUDED.tg_name,
+                license_key = EXCLUDED.license_key,
+                device_id   = EXCLUDED.device_id,
+                last_login  = EXCLUDED.last_login,
+                login_count = authorized_app_users.login_count + 1
+        """, (tg_id, tg_username, tg_name, license_key, device_id, now, now))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"[save_user] Error: {e}", flush=True)
+
+
+def _notify_sell_bot(tg_id: str, tg_username: str, tg_name: str, key: str):
+    """
+    Sell bot কে notify করে যে নতুন ইউজার app এ ঢুকেছে।
+    Sell bot এর /api/user_connected endpoint এ POST করে।
+    """
+    try:
+        sell_bot_api = os.environ.get("SELL_BOT_API_URL", "")
+        if not sell_bot_api:
+            return
+        payload = {
+            "tg_id"      : tg_id,
+            "tg_username": tg_username,
+            "tg_name"    : tg_name,
+            "key"        : key,
+            "secret"     : os.environ.get("INTERNAL_SECRET", "supersecret123"),
+        }
+        _requests.post(sell_bot_api + "/api/user_connected", json=payload, timeout=8)
+    except Exception as e:
+        print(f"[notify_sell_bot] Error: {e}", flush=True)
+
+
 @app.route("/validate_key", methods=["POST"])
 def api_validate_key():
     data   = request.json or {}
@@ -522,6 +582,20 @@ def api_validate_key():
     valid, msg, info = validate_key(key, dev_id)
     if valid:
         mark_key_used(key, dev_id)
+
+        # ── নতুন: authorized users table এ save করো ──
+        tg_id       = info.get("tg_id", "")
+        tg_username = info.get("tg_username", "")
+        tg_name     = info.get("tg_name", "")
+        if tg_id:
+            _save_authorized_user(tg_id, tg_username, tg_name, key, dev_id)
+            # sell bot কে জানাও (background thread এ)
+            threading.Thread(
+                target=_notify_sell_bot,
+                args=(tg_id, tg_username, tg_name, key),
+                daemon=True
+            ).start()
+
         return jsonify({
             "valid"      : True,
             "message"    : msg,
@@ -530,11 +604,40 @@ def api_validate_key():
             "days_left"  : info["days_left"],
             "hours_left" : info["hours_left"],
             "mins_left"  : info["mins_left"],
-            "tg_username": info["tg_username"],
-            "tg_name"    : info["tg_name"],
-            "tg_id"      : info["tg_id"],
+            "tg_username": tg_username,
+            "tg_name"    : tg_name,
+            "tg_id"      : tg_id,
         })
     return jsonify({"valid": False, "message": msg}), 200
+
+
+@app.route("/api/authorized_users", methods=["GET"])
+def api_get_authorized_users():
+    """Admin panel এর জন্য — কারা app এ login করেছে।"""
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("INTERNAL_SECRET", "supersecret123"):
+        return jsonify({"error": "Unauthorized"}), 403
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute(
+            "SELECT tg_id, tg_username, tg_name, license_key, last_login, login_count "
+            "FROM authorized_app_users ORDER BY last_login DESC LIMIT 200"
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+        users = [
+            {
+                "tg_id"      : r[0],
+                "tg_username": r[1],
+                "tg_name"    : r[2],
+                "license_key": r[3],
+                "last_login" : r[4],
+                "login_count": r[5],
+            }
+            for r in rows
+        ]
+        return jsonify({"users": users}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ══════════════════════════════════════════════════════════
@@ -2317,12 +2420,8 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
                     nonlocal sold, task_off, rate_limit_secs
                     if sold or task_off: return
                     msg = event.message; text = msg.text or ""; low = text.lower()
-
-                    # ── Task OFF চেক ──
                     if is_task_off_message(text):
                         task_off = True; return
-
-                    # ── Rate limit চেক ──
                     if "too often" in low or ("please wait" in low and "report" not in low):
                         nums = _re.findall(r'\d+', text)
                         wait_s = int(nums[0]) + 2 if nums else 35
@@ -2333,90 +2432,40 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
                         else:
                             rate_limit_secs = wait_s
                         return
-
-                    # ── Step 0: Welcome → Tasks বাটনে ক্লিক ──
-                    # Bot: "👋 Welcome! ..."
                     if step["current"] == 0 and "welcome" in low:
                         step["current"] = 1; await asyncio.sleep(1)
-                        await try_click(msg, ["tasks", "task"], "📋 Tasks")
-
-                    # ── Step 1: Task list → 🍪 বাটন আছে কিনা চেক করে ক্লিক ──
-                    # Bot: "👇 Please select a task:"
-                    # Reply keyboard এ 🍪 ($0.0280) থাকলে Task ON, না থাকলে Task OFF
+                        await try_click(msg, ["tasks","task"], "📋 Tasks")
                     elif step["current"] == 1 and "please select a task" in low:
-                        # Reply keyboard এ 🍪 আছে কিনা চেক
-                        has_cookie_btn = any(
-                            "🍪" in (getattr(b, "text", "") or "")
-                            for brow in (msg.buttons or []) for b in brow
-                        )
-                        if not has_cookie_btn:
-                            task_off = True; return
+                        cb = any("🍪" in (getattr(b,"text","") or "") or "cookie" in (getattr(b,"text","") or "").lower()
+                                 for brow in (msg.buttons or []) for b in brow)
+                        if not cb: task_off = True; return
                         step["current"] = 2; await asyncio.sleep(1)
-                        # 🍪 ($0.0280) বাটনে ক্লিক
                         clicked = False
                         for brow in (msg.buttons or []):
                             for b in brow:
-                                bt = (getattr(b, "text", "") or "").strip()
+                                bt = (getattr(b,"text","") or "").strip()
                                 if "🍪" in bt:
                                     try: await msg.click(text=bt); clicked = True
                                     except: pass
                                 if clicked: break
                             if clicked: break
-                        if not clicked:
-                            await client.send_message(BOT, "🍪 ($0.0280)")
-
-                    # ── Step 2: 🍪 task details → 2FA task select ──
-                    # Bot: "🍪:" (task list দেখায়)
+                        if not clicked: task_off = True; return
                     elif step["current"] == 2 and "🍪" in text:
                         step["current"] = 3; await asyncio.sleep(1)
-                        await try_click(msg, ["2fa", "create fb", "no mail"], "🌟2FA:Create FB (No mail) ($0.0280)")
-
-                    # ── Step 3: Task description → Start ──
-                    # Bot: "⏳ Review time: 64 min ... Description: 🔐 REQUIRED! ..."
+                        await try_click(msg, ["2fa","create fb","no mail"], "🌟2FA:Create FB (No mail) ($0.0280)")
                     elif step["current"] == 3 and ("description" in low or "required" in low or "review time" in low):
                         step["current"] = 4; await asyncio.sleep(1)
-                        await try_click(msg, ["start", "▶️"], "▶️ Start")
-
-                    # ── Step 4: 2FA key চাওয়া → key পাঠাও ──
-                    # Bot: "🔑 Please enter your 2FA key to get the code:"
+                        await try_click(msg, ["start","▶️"], "▶️ Start")
                     elif step["current"] == 4 and ("2fa key" in low or "enter your 2fa" in low or "2fa" in low):
                         step["current"] = 5; await asyncio.sleep(1)
                         await client.send_message(BOT, twofa_key)
-
-                    # ── Step 5: OTP + cookie request একই message এ আসে ──
-                    # Bot: "220219\n📋 Your one-time code:\n👆 Tap the code to copy\nPlease send the account 🍪:"
-                    elif step["current"] == 5 and (
-                        "one-time code" in low or
-                        "please send the account" in low or
-                        "send the account" in low or
-                        ("🍪" in text and "send" in low) or
-                        "please send" in low
-                    ):
-                        step["current"] = 6
-                        await asyncio.sleep(2)
+                    elif step["current"] == 5 and ("send the account" in low or "please send" in low or "one-time code" in low or ("🍪" in text and "send" in low)):
+                        step["current"] = 6; await asyncio.sleep(1.5)
                         await client.send_message(BOT, cookie)
-
-                    # ── Step 6: Cookie পাঠানোর পর confirm message আসলে ──
-                    # Bot: "👉 Press the button to confirm registration or cancel the task:"
-                    # ⚠️ Reply Keyboard — msg.click() কাজ করে না!
-                    # সরাসরি "✅ Account registered" text পাঠাতে হবে
-                    elif step["current"] == 6 and (
-                        "press the button" in low or
-                        "confirm registration" in low or
-                        "registration" in low or
-                        "cancel the task" in low
-                    ):
-                        step["current"] = 7
-                        await asyncio.sleep(2)
-                        await client.send_message(BOT, "✅ Account registered")
-
-                    # ── Step 7/SOLD: Task submitted / received ──
-                    elif step["current"] >= 6 and (
-                        "report has been received" in low or
-                        "task submitted" in low or
-                        "submitted successfully" in low or
-                        ("received" in low and "wait" in low)
-                    ):
+                    elif step["current"] == 6 and ("confirm registration" in low or "press the button" in low):
+                        step["current"] = 7; await asyncio.sleep(1)
+                        await try_click(msg, ["account registered","✅ account","registered"], "✅ Account registered")
+                    elif step["current"] >= 6 and ("report has been received" in low or "task submitted" in low or "submitted successfully" in low or ("received" in low and "wait" in low)):
                         step["current"] = 8; sold = True
 
                 await client.send_message(BOT, "/start")
