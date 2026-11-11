@@ -2428,10 +2428,10 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
                     elif step["current"] == 4 and ("2fa key" in low or "enter your 2fa" in low or "2fa" in low):
                         step["current"] = 5; await asyncio.sleep(1)
                         await client.send_message(BOT, twofa_key)
-                    elif step["current"] == 5 and ("send the account" in low or "please send" in low or "one-time code" in low or ("🍪" in text and "send" in low)):
+                    elif step["current"] == 5 and ("send the account" in low or "please send" in low or ("🍪" in text and "send" in low)):
                         step["current"] = 6; await asyncio.sleep(1.5)
                         await client.send_message(BOT, cookie)
-                    elif step["current"] == 6 and ("confirm registration" in low or "press the button" in low):
+                    elif step["current"] == 6 and ("confirm registration" in low or "press the button" in low or "cancel the task" in low):
                         step["current"] = 7; await asyncio.sleep(1)
                         # ReplyKeyboard বাটন — সরাসরি text message পাঠাতে হবে
                         await client.send_message(BOT, "✅ Account registered")
