@@ -1,4 +1,3 @@
-
 # ============================================================
 # FILE: app.py  — FORCE JOIN + EMOJI CAPTCHA + COLORED BUTTONS
 # Requirements: flask, gunicorn, telethon, psycopg2-binary, python-telegram-bot>=22.7
