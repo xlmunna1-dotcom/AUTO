@@ -2433,10 +2433,8 @@ def run_scheduled_sell_for_user(tg_user_id: str, gap_sec: int, task_off_wait: in
                         await client.send_message(BOT, cookie)
                     elif step["current"] == 6 and ("confirm registration" in low or "press the button" in low):
                         step["current"] = 7; await asyncio.sleep(1)
-                        # ReplyKeyboard বাটন — inline click কাজ করে না, text message পাঠাতে হবে
-                        clicked = await try_click(msg, ["account registered","✅ account","registered"], None)
-                        if not clicked:
-                            await client.send_message(BOT, "✅ Account registered")
+                        # ReplyKeyboard বাটন — সরাসরি text message পাঠাতে হবে
+                        await client.send_message(BOT, "✅ Account registered")
                     elif step["current"] >= 6 and ("report has been received" in low or "task submitted" in low or "submitted successfully" in low or ("received" in low and "wait" in low)):
                         step["current"] = 8; sold = True
 
@@ -2524,30 +2522,4 @@ def schedule_checker_loop():
                 conn4.commit(); cur4.close(); conn4.close()
 
         except Exception as e:
-            print(f"[SCHED] Checker error: {e}", flush=True)
-        time.sleep(30)
-
-
-_sched_thread = threading.Thread(target=schedule_checker_loop, daemon=True)
-_sched_thread.start()
-
-
-# ══════════════════════════════════════════════════
-#  BOT THREAD
-# ══════════════════════════════════════════════════
-def _bot_thread_wrapper():
-    try:
-        print("[BOT THREAD] Starting...", flush=True)
-        run_license_bot()
-    except Exception as e:
-        import traceback
-        print(f"[BOT THREAD] DEAD: {e}", flush=True)
-        traceback.print_exc()
-
-bot_thread = threading.Thread(target=_bot_thread_wrapper, daemon=True)
-bot_thread.start()
-print("[BOT THREAD] Launched.", flush=True)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+            print(f"[SCHED] C
