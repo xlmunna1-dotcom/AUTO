@@ -1,6 +1,6 @@
-flask
-gunicorn
-telethon
+pyTelegramBotAPI
 requests
-psycopg2-binary
-python-telegram-bot>=22.7
+flask
+phonenumbers
+pycountry
+urllib3
